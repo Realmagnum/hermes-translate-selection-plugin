@@ -1,0 +1,10 @@
+name: translate-selection
+version: 1.0.0
+description: "Instant inline translation tooltip on text selection for Hermes Desktop with Smart Hybrid LLM/MT routing."
+author: Realmagnum
+platforms: [linux, macos, windows]
+capabilities:
+  provides_tools: []
+  provides_hooks: []
+  provides_middleware: []
+  requires_env: []
