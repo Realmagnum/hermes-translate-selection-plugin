@@ -2,7 +2,7 @@
 
 [![Hermes Desktop](https://img.shields.io/badge/Hermes_Desktop-Plugin-blue.svg)](https://hermes-agent.nousresearch.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-6%20passed-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/Tests-8%20passed-brightgreen.svg)](#testing)
 
 [Русский](README_RU.md) · [Micro-Spec](docs/plans/microspec-v1.md) · [Architecture](docs/reference/opencode-vs-hermes.md)
 
@@ -29,16 +29,20 @@ Ported from [opencode-translate-selection](https://github.com/Realmagnum/opencod
 - **Smart Hybrid Routing:**
   - **Simple phrases & short sentences:** Instant multi-tier machine translation (Google MT Tier 1 `gtx` → Tier 2 `dict-chrome-ex` → Tier 3 `MyMemory API`).
   - **Complex, structured & code text:** Automatic heuristic detection of lists, code blocks, function calls, headers, and parameters → routed to the session LLM via the native Hermes gateway RPC `llm.oneshot` without polluting conversation history.
+- **Source Badges:** Clear indication of translation engine (`Google`, `LLM`, `MyMemory`) on both tooltip rows and sidebar cards.
+- **Russian Language Priority:** Smart Cyrillic disambiguation prevents common Russian words (e.g. *правая*) from falsely detecting as Belarusian (`be`) or Ukrainian (`uk`).
 - **Token Shielding:** Code identifiers, API calls, inline code spans, and URLs are shielded with mathematical markers (`\u27A6N\u27A7`) to prevent machine translation engines from corrupting technical syntax.
-- **Multi-Target Parallel Translation:** Translates simultaneously to multiple target languages (default: `ru, en`).
-- **Source Language Auto-Filtering:** Automatically suppresses target languages matching the detected source (e.g. Russian text translates only to English; English translates only to Russian).
-- **Persistent Side Panel (`PANES_AREA`):** Right-rail panel (340px) featuring a translation history feed, engine badges (`LLM`/`MT`), manual translation input, and settings controls.
-- **Conflict-Free Hotkeys:**
+- **Double-Click & Drag Coalescing:** Intelligent 280ms debounce and history coalescing merge single-word clicks into extended phrase selections instead of spawning fragmented duplicate cards.
+- **Persistent Side Panel (`PANES_AREA`):** Right-rail panel (340px) featuring a translation history feed with auto-scroll, close button (`[X]`), manual translation input, and rich settings.
+- **Conflict-Free Hotkeys & Quick Toggles:**
   - `Alt+T` — Translate clipboard text (and automatically copies the translated result).
   - `Alt+Shift+T` — Translate the last assistant message into the side panel.
   - `Alt+P` — Toggle the persistent translation side panel.
+  - `Alt+Shift+O` — Quick toggle auto-popup on selection on/off.
+  - **Interactive Status Bar Chip:** Live chip in the bottom right status bar (`● Translate: On` / `○ Translate: Paused`) for 1-click toggling.
+- **Synchronous i18n:** Built with `ctx.i18n` and `usePluginI18n` — seamlessly re-renders all plugin UI when Hermes Desktop switches language (EN / RU).
+- **Flexible History Modes:** Full history (up to 50 entries), Latest only (single card), or Disabled.
 - **5 Theme Presets:** Amber Gold, Midnight OLED, Cyberpunk, Nordic Slate, and Paper Light with native Hermes app theme blur and styling.
-- **1-Click Copy:** Click any translation row to instantly copy its text to the clipboard.
 
 ---
 
@@ -58,66 +62,30 @@ Copy `src/plugin.js` into your Hermes desktop plugins directory:
 **Linux / macOS:**
 ```bash
 mkdir -p ~/.hermes/desktop-plugins/translate-selection
-cp src/plugin.js ~/.hermes/desktop-plugins/translate-selection/plugin.js
+curl -fsSL https://raw.githubusercontent.com/Realmagnum/hermes-translate-selection-plugin/master/src/plugin.js -o ~/.hermes/desktop-plugins/translate-selection/plugin.js
 ```
 
 **Windows (PowerShell):**
 ```powershell
 New-Item -ItemType Directory -Force "$HOME\.hermes\desktop-plugins\translate-selection"
-Copy-Item src\plugin.js "$HOME\.hermes\desktop-plugins\translate-selection\plugin.js"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Realmagnum/hermes-translate-selection-plugin/master/src/plugin.js" -OutFile "$HOME\.hermes\desktop-plugins\translate-selection\plugin.js"
 ```
 
 After copying, press `Ctrl+K` (or `Cmd+K`) in Hermes Desktop → **Reload desktop plugins**.
 
 ---
 
-## ⌨️ Command Palette
-
-All commands are registered in the palette (`Ctrl+K` / `Cmd+K`):
-- `Translate: Translate clipboard (Alt+T)`
-- `Translate: Translate last assistant message (Alt+Shift+T)`
-- `Translate: Toggle translation panel (Alt+P)`
-
----
-
 ## ⚙️ Settings
 
 Configure the plugin directly from the side panel header (gear icon):
-- **Target Languages:** Comma-separated list of language codes (default: `ru, en`, or e.g. `ru, en, de, zh, ja`).
-- **Engine Mode:**
-  - `Auto (Smart Hybrid)` — Automatic routing (LLM for structured text/code, MT for simple phrases).
-  - `Fast MT Only` — Fast multi-tier machine translation without calling LLM.
-  - `Session LLM Only` — Translates strictly using the active session language model.
-- **Theme Preset:** Switch between 5 high-contrast presets with translucent background blur.
+- **Target Languages:** Comma-separated list of language codes (default: `ru, en`).
+- **Engine Mode:** Auto (Smart Hybrid), Fast MT Only, Session LLM Only.
+- **History Mode:** Full history (up to 50), Keep latest only, or Disabled.
+- **Debounce Delay:** 150ms (fast), 280ms (optimal), 450ms (double-click safe).
+- **Auto-Popup:** Enable/disable auto-popup on mouse selection.
+- **Theme Preset:** Amber Gold, Midnight OLED, Cyberpunk, Nordic Slate, Paper Light.
 
 All settings are persisted in namespaced storage via `ctx.storage` (`translate-selection.v1`).
-
----
-
-## 🛠️ Architecture & Tree-Docs
-
-Organized according to **tree-docs** and **microspec** standards:
-
-```
-📁 hermes-translate-selection-plugin/
-├── AGENTS.md                  # Agent entrypoint and navigation map (EN)
-├── AGENTS_RU.md               # Agent entrypoint and navigation map (RU)
-├── README.md                  # Main project guide (EN)
-├── README_RU.md               # Project guide in Russian (RU)
-├── docs/
-│   ├── plans/
-│   │   ├── microspec-v1.md    # Micro-specification and implementation phases (EN)
-│   │   └── microspec-v1_RU.md # Micro-specification and implementation phases (RU)
-│   └── reference/
-│       ├── hermes-sdk-patterns.md     # Hermes SDK architectural lessons (EN)
-│       ├── hermes-sdk-patterns_RU.md  # Hermes SDK architectural lessons (RU)
-│       ├── opencode-vs-hermes.md      # Contract & API mapping from OpenCode (EN)
-│       └── opencode-vs-hermes_RU.md   # Contract & API mapping from OpenCode (RU)
-├── src/
-│   └── plugin.js              # Fully self-contained ESM desktop plugin bundle
-└── test/
-    └── unit.test.mjs          # Automated unit test suite
-```
 
 ---
 
