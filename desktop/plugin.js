@@ -8,20 +8,16 @@
  * - Automatic fail-safe fallback to Token-Shielded MT if LLM times out or errors
  *
  * Fully self-contained ECMAScript Module (ESM) compatible with Hermes Desktop plugin loader.
+ * Uses standard React.createElement (h) to ensure full runtime reliability without JSX transpilation.
  *
  * @module hermes-translate-selection-plugin
  * @author Realmagnum
  * @license MIT
  */
 
-import React, {
-  useState,
-  useEffect,
-  useRef,
-  useCallback,
-  useLayoutEffect,
-  useMemo,
-} from "react";
+import React from "react";
+
+const { useState, useEffect, useRef, useCallback, useLayoutEffect, useMemo } = React;
 import {
   host,
   atom,
@@ -45,7 +41,9 @@ import {
   PALETTE_AREA,
   STATUSBAR_AREAS,
 } from "@hermes/plugin-sdk";
-import { jsx, jsxs } from "react/jsx-runtime";
+
+// Shorthand for React.createElement
+const h = React.createElement;
 
 /* ══════════════════════════════════════════════════════════════════════════
    1. CONSTANTS & THEMES
@@ -179,7 +177,6 @@ let _os = null;
 const settingsAtom = atom(DEFAULT_SETTINGS);
 const panelOpenAtom = atom(false);
 const historyAtom = atom([]); // Array<{ id, sourceText, detected, results: Array<{lang, text, engineUsed}>, time }>
-const activeTranslateRequestAtom = atom(0);
 
 function loadSettings(storage) {
   try {
@@ -208,7 +205,7 @@ function addHistoryEntry(entry) {
   const list = historyAtom.get();
   const next = [
     { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), time: new Date(), ...entry },
-    ...list.slice(0, 49), // retain up to 50 items
+    ...list.slice(0, 49),
   ];
   historyAtom.set(next);
 }
@@ -234,10 +231,6 @@ function targetLangName(code) {
   return LANGUAGE_NAMES[norm] ?? code.toUpperCase();
 }
 
-/**
- * Token Shielding: protects code, function calls, and markdown code spans
- * from being mangled or translated by machine translation engines.
- */
 const SHIELD_RE =
   /(`{1,3}[^`]+`{1,3}|\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z0-9_.]+\([^)]*\)|\b(?:https?|ftp):\/\/[^\s/$.?#].[^\s]*)/g;
 
@@ -255,22 +248,16 @@ function unshieldTokens(text, tokens) {
   if (!tokens || !tokens.length) return text;
   let out = text;
   tokens.forEach((token, index) => {
-    // Accommodate potential whitespace injected by MT engines
     const pattern = new RegExp(`\u27A6\\s*${index}\\s*\u27A7`, "g");
     out = out.replace(pattern, token);
   });
   return out;
 }
 
-/**
- * Complexity detector: returns true if the snippet has structured lists,
- * code blocks, function calls, or multiple paragraphs worth preserving with LLM.
- */
 function isComplexFormattedText(raw) {
   if (!raw) return false;
   const trimmed = raw.trim();
 
-  // Short single-line snippets under 40 chars without code, brackets, or fences are simple
   if (
     trimmed.length < 40 &&
     !trimmed.includes("\n") &&
@@ -283,26 +270,15 @@ function isComplexFormattedText(raw) {
 
   const lines = trimmed.split("\n").map((l) => l.trim()).filter(Boolean);
 
-  // 1. Multi-line structures
   if (lines.length >= 2) {
-    // Bullet or numbered lists: •, -, *, +, 1., 1)
     if (lines.some((l) => /^([•\-*+]|\d+[.)]|\d+-\d+)\s/.test(l))) return true;
-    // Markdown headers
     if (lines.some((l) => /^#{1,6}\s/.test(l))) return true;
-    // Markdown blockquotes
     if (lines.some((l) => /^>\s?/.test(l))) return true;
   }
 
-  // 2. Code fences or inline code
   if (/`{1,3}[^`]+`{1,3}/.test(trimmed)) return true;
-
-  // 3. Technical calls / identifiers (e.g. tools.opencode.models({ ... }))
   if (/\b[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*\(/.test(trimmed)) return true;
-
-  // 4. Key-value / JSON parameter syntax
   if (/\{[\s\S]*:[ \t]*[\s\S]*\}/.test(trimmed)) return true;
-
-  // 5. Paragraph structure with 3 or more lines
   if (lines.length >= 3) return true;
 
   return false;
@@ -409,9 +385,6 @@ async function translateWithMtFallback(text, to, signal) {
   }
 }
 
-/**
- * LLM translation via native Hermes gateway `llm.oneshot` RPC
- */
 function buildLlmPrompt(text, targetLang) {
   const lang = targetLangName(targetLang);
   return `Translate the following text to ${lang}.
@@ -426,11 +399,9 @@ ${text}`;
 
 function cleanLlmOutput(output, originalText) {
   let text = output.trim();
-  // Strip outer ```markdown ... ``` wrapper if the source text was not a code block
   if (!originalText.trim().startsWith("```") && text.startsWith("```") && text.endsWith("```")) {
     text = text.replace(/^```[a-zA-Z]*\r?\n?/, "").replace(/\r?\n?```$/, "").trim();
   }
-  // Strip conversational intros if the model added any
   text = text.replace(/^(?:Here is the translation|Вот перевод|Translation|Перевод):\s*\r?\n?/i, "").trim();
   return text;
 }
@@ -473,9 +444,6 @@ async function translateWithLlmOneshot(text, targetLang, sessionId, timeoutMs, s
   }
 }
 
-/**
- * Main Translation Coordinator with Smart Hybrid Routing
- */
 async function executeTranslate(input, signal) {
   const rawText = input.text.replace(/\r/g, "").trim();
   const targets = [...new Set(input.targets.map((lang) => lang.trim().toLowerCase()).filter(Boolean))];
@@ -493,7 +461,7 @@ async function executeTranslate(input, signal) {
     : targets;
   const targetsToTranslate = activeTargets.length > 0 ? activeTargets : targets;
 
-  // ──────────────────────────── 1. LLM Translation Path ────────────────────────────
+  // 1. LLM Translation Path
   if (shouldTryLlm) {
     try {
       const llmSettled = await Promise.allSettled(
@@ -528,7 +496,6 @@ async function executeTranslate(input, signal) {
       }
 
       if (mode === "llm") {
-        // If mode was strictly LLM, don't fall back, report failure
         return {
           detected: detectedSource,
           results: targetsToTranslate.map((lang) => ({
@@ -552,7 +519,7 @@ async function executeTranslate(input, signal) {
     }
   }
 
-  // ──────────────────────── 2. MT Pipeline (with Token Shielding) ───────────────────
+  // 2. MT Pipeline (with Token Shielding)
   const { shielded, tokens } = shieldTokens(rawText);
 
   const settled = await Promise.allSettled(
@@ -612,7 +579,6 @@ function ensurePopupStyles(settings) {
 
   const s = document.createElement("style");
   s.id = styleId;
-  const borderCol = hexToRgba(settings.accentColor, 0.45);
 
   s.textContent = `
     @keyframes hermes-translate-in {
@@ -666,69 +632,54 @@ function ensurePopupStyles(settings) {
   document.head.appendChild(s);
 }
 
-/** FormattedText: renders bold, code spans, linebreaks safely */
 function FormattedTranslation({ text, settings }) {
   if (!text) return null;
   const lines = text.split("\n");
 
-  return jsx("div", {
+  return h("div", {
     style: {
       color: settings.textColor,
       whiteSpace: "pre-wrap",
       overflowWrap: "anywhere",
       lineHeight: 1.45,
     },
-    children: lines.map((line, lIdx) => {
-      // Parse markdown inline bold **...** and `code`
-      const parts = [];
-      const tokenRe = /(\*\*[^*]+\*\*|`[^`]+`)/g;
-      let lastIndex = 0;
-      let match;
+  }, lines.map((line, lIdx) => {
+    const parts = [];
+    const tokenRe = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+    let lastIndex = 0;
+    let match;
 
-      while ((match = tokenRe.exec(line)) !== null) {
-        if (match.index > lastIndex) {
-          parts.push(line.slice(lastIndex, match.index));
-        }
-        const tok = match[0];
-        if (tok.startsWith("**") && tok.endsWith("**")) {
-          parts.push(
-            jsx(
-              "strong",
-              {
-                key: `b-${lIdx}-${match.index}`,
-                style: { fontWeight: 650, color: settings.accentColor },
-                children: tok.slice(2, -2),
-              },
-            ),
-          );
-        } else if (tok.startsWith("`") && tok.endsWith("`")) {
-          parts.push(
-            jsx(
-              "code",
-              {
-                key: `c-${lIdx}-${match.index}`,
-                className: "hermes-tr-code",
-                children: tok.slice(1, -1),
-              },
-            ),
-          );
-        }
-        lastIndex = match.index + tok.length;
+    while ((match = tokenRe.exec(line)) !== null) {
+      if (match.index > lastIndex) {
+        parts.push(line.slice(lastIndex, match.index));
       }
-      if (lastIndex < line.length) {
-        parts.push(line.slice(lastIndex));
+      const tok = match[0];
+      if (tok.startsWith("**") && tok.endsWith("**")) {
+        parts.push(
+          h("strong", {
+            key: `b-${lIdx}-${match.index}`,
+            style: { fontWeight: 650, color: settings.accentColor },
+          }, tok.slice(2, -2))
+        );
+      } else if (tok.startsWith("`") && tok.endsWith("`")) {
+        parts.push(
+          h("code", {
+            key: `c-${lIdx}-${match.index}`,
+            className: "hermes-tr-code",
+          }, tok.slice(1, -1))
+        );
       }
+      lastIndex = match.index + tok.length;
+    }
+    if (lastIndex < line.length) {
+      parts.push(line.slice(lastIndex));
+    }
 
-      return jsx(
-        "div",
-        {
-          key: lIdx,
-          style: { minHeight: line.trim() === "" ? "0.6em" : "auto" },
-          children: parts.length > 0 ? parts : "\u00A0",
-        },
-      );
-    }),
-  });
+    return h("div", {
+      key: lIdx,
+      style: { minHeight: line.trim() === "" ? "0.6em" : "auto" },
+    }, parts.length > 0 ? parts : "\u00A0");
+  }));
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -805,7 +756,6 @@ function SelectionPopupHost() {
           error: output.results.length === 0 ? LABELS.failed : undefined,
         });
 
-        // Record in side panel history
         if (output.results && output.results.length > 0) {
           addHistoryEntry({
             sourceText: text,
@@ -868,7 +818,6 @@ function SelectionPopupHost() {
     runTranslation(text, truncated, place);
   }, [runTranslation]);
 
-  // Event listeners for selection detection & dismiss
   useEffect(() => {
     ensurePopupStyles(settings);
 
@@ -956,7 +905,7 @@ function SelectionPopupHost() {
     alignItems: "center",
   };
 
-  return jsx("div", {
+  return h("div", {
     ref: (el) => (rootRef.current = el),
     className: POPUP_CLASS,
     style: shellStyle,
@@ -966,105 +915,77 @@ function SelectionPopupHost() {
     },
     onMouseEnter: () => (pinnedRef.current = true),
     onMouseLeave: () => (pinnedRef.current = false),
-    children: [
-      // 1. Loading State
-      view.loading &&
-        jsx("div", {
-          className: "hermes-tr-row",
-          style: { color: settings.accentColor, gap: "8px" },
-          children: [
-            jsx(Loader, { className: "size-3", label: LABELS.loading }),
-            jsx("span", { children: LABELS.loading }),
-          ],
-        }),
+  },
+    view.loading && h("div", {
+      className: "hermes-tr-row",
+      style: { color: settings.accentColor, gap: "8px" },
+    },
+      h(Loader, { className: "size-3", label: LABELS.loading }),
+      h("span", null, LABELS.loading)
+    ),
 
-      // 2. Error State
-      !view.loading &&
-        view.error &&
-        jsx("div", {
-          className: "hermes-tr-row",
-          style: { color: "#f0a35e", gap: "8px" },
-          children: [
-            jsx("span", { style: langTagStyle, children: "!" }),
-            jsx("span", { children: `${LABELS.failed}: ${view.error}` }),
-          ],
-        }),
+    !view.loading && view.error && h("div", {
+      className: "hermes-tr-row",
+      style: { color: "#f0a35e", gap: "8px" },
+    },
+      h("span", { style: langTagStyle }, "!"),
+      h("span", null, `${LABELS.failed}: ${view.error}`)
+    ),
 
-      // 3. Translation Results
-      !view.loading &&
-        !view.error &&
-        (view.results || []).map((result, idx) =>
-          jsx(
-            "div",
-            {
-              key: idx,
-              className: "hermes-tr-row",
-              title: "Нажмите, чтобы скопировать",
-              onClick: () => {
-                if (!result.text) return;
-                writeClipboardText(result.text);
-                setCopied(true);
-                setTimeout(() => setCopied(false), 2000);
-              },
-              children: [
-                jsx("div", {
-                  style: {
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    gap: "2px",
-                  },
-                  children: [
-                    jsx("span", { style: langTagStyle, children: result.lang }),
-                    result.engineUsed === "llm" &&
-                      jsx("span", {
-                        style: {
-                          fontSize: "8px",
-                          fontWeight: "700",
-                          padding: "0 3px",
-                          borderRadius: "3px",
-                          background: "rgba(255, 215, 94, 0.18)",
-                          color: settings.accentColor,
-                          letterSpacing: "0.05em",
-                          lineHeight: "1.2",
-                        },
-                        children: "LLM",
-                      }),
-                  ],
-                }),
-                jsx("div", {
-                  style: { flex: 1, minWidth: 0 },
-                  children: result.error
-                    ? jsx("span", { style: { color: "#f0a35e" }, children: result.error })
-                    : jsx(FormattedTranslation, { text: result.text, settings }),
-                }),
-              ],
+    !view.loading && !view.error && (view.results || []).map((result, idx) =>
+      h("div", {
+        key: idx,
+        className: "hermes-tr-row",
+        title: "Нажмите, чтобы скопировать",
+        onClick: () => {
+          if (!result.text) return;
+          writeClipboardText(result.text);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        },
+      },
+        h("div", {
+          style: {
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: "2px",
+          },
+        },
+          h("span", { style: langTagStyle }, result.lang),
+          result.engineUsed === "llm" && h("span", {
+            style: {
+              fontSize: "8px",
+              fontWeight: "700",
+              padding: "0 3px",
+              borderRadius: "3px",
+              background: "rgba(255, 215, 94, 0.18)",
+              color: settings.accentColor,
+              letterSpacing: "0.05em",
+              lineHeight: "1.2",
             },
-          ),
+          }, "LLM")
         ),
+        h("div", { style: { flex: 1, minWidth: 0 } },
+          result.error
+            ? h("span", { style: { color: "#f0a35e" } }, result.error)
+            : h(FormattedTranslation, { text: result.text, settings })
+        )
+      )
+    ),
 
-      // 4. Meta Footer: Copy feedback, Truncated indicator, Panel button
-      jsx("div", {
-        style: metaStyle,
-        children: [
-          jsx("span", {
-            children: copied
-              ? LABELS.copied
-              : `${LABELS.copy}${view.truncated ? ` · ${LABELS.truncated}` : ""}`,
-          }),
-          jsx(
-            "button",
-            {
-              className: "hermes-tr-btn-ghost",
-              onClick: () => panelOpenAtom.set(true),
-              title: "Открыть в боковой панели",
-            },
-            [jsx(Codicon, { key: "icon", name: "layout-sidebar-right", size: 12 }), "Панель"],
-          ),
-        ],
-      }),
-    ],
-  });
+    h("div", { style: metaStyle },
+      h("span", null, copied ? LABELS.copied : `${LABELS.copy}${view.truncated ? ` · ${LABELS.truncated}` : ""}`),
+      h("button", {
+        className: "hermes-tr-btn-ghost",
+        onClick: () => panelOpenAtom.set(true),
+        title: "Открыть в боковой панели",
+      },
+        h(Codicon, { name: "layout-sidebar-right", size: 12 }),
+        "Панель"
+      )
+    )
+  );
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1079,7 +1000,6 @@ function TranslationPane({ ctx }) {
   const [copiedId, setCopiedId] = useState("");
   const [showSettings, setShowSettings] = useState(false);
 
-  // Settings form draft state
   const [targetDraft, setTargetDraft] = useState(settings.targets);
   const [modeDraft, setModeDraft] = useState(settings.engineMode);
   const [themeDraft, setThemeDraft] = useState(settings.themePreset || "amber");
@@ -1140,282 +1060,195 @@ function TranslationPane({ ctx }) {
     setTimeout(() => setCopiedId(""), 2000);
   };
 
-  return jsx("div", {
+  return h("div", {
     className: "flex flex-col h-full overflow-hidden p-3 space-y-3",
     style: {
       color: "var(--ui-text-primary)",
       fontFamily: "var(--font-sans, inherit)",
       fontSize: "0.8125rem",
     },
-    children: [
-      // 1. Header Toolbar
-      jsx("div", {
-        className: "flex items-center justify-between pb-2 border-b border-[var(--ui-stroke-secondary)]",
-        children: [
-          jsx("div", {
-            className: "flex items-center gap-1.5 font-semibold text-xs tracking-wide uppercase",
-            children: [
-              jsx(Codicon, { name: "globe", size: 14 }),
-              "Перевод",
-              jsx(Badge, {
-                variant: settings.engineMode === "llm" ? "default" : "outline",
-                className: "ml-1 text-[10px]",
-                children: settings.engineMode.toUpperCase(),
-              }),
-            ],
-          }),
-          jsx("div", {
-            className: "flex items-center gap-1",
-            children: [
-              jsx(
-                Button,
-                {
-                  size: "sm",
-                  variant: showSettings ? "default" : "ghost",
-                  title: "Настройки плагина",
-                  onClick: () => setShowSettings(!showSettings),
-                },
-                jsx(Codicon, { name: "settings-gear", size: 13 }),
-              ),
-              history.length > 0 &&
-                jsx(
-                  Button,
-                  {
-                    size: "sm",
-                    variant: "ghost",
-                    title: LABELS.clearHistory,
-                    onClick: () => historyAtom.set([]),
-                  },
-                  jsx(Codicon, { name: "clear-all", size: 13 }),
-                ),
-            ],
-          }),
-        ],
+  },
+    // 1. Header Toolbar
+    h("div", {
+      className: "flex items-center justify-between pb-2 border-b border-[var(--ui-stroke-secondary)]",
+    },
+      h("div", {
+        className: "flex items-center gap-1.5 font-semibold text-xs tracking-wide uppercase",
+      },
+        h(Codicon, { name: "globe", size: 14 }),
+        "Перевод",
+        h(Badge, {
+          variant: settings.engineMode === "llm" ? "default" : "outline",
+          className: "ml-1 text-[10px]",
+        }, settings.engineMode.toUpperCase())
+      ),
+      h("div", { className: "flex items-center gap-1" },
+        h(Button, {
+          size: "sm",
+          variant: showSettings ? "default" : "ghost",
+          title: "Настройки плагина",
+          onClick: () => setShowSettings(!showSettings),
+        }, h(Codicon, { name: "settings-gear", size: 13 })),
+        history.length > 0 && h(Button, {
+          size: "sm",
+          variant: "ghost",
+          title: LABELS.clearHistory,
+          onClick: () => historyAtom.set([]),
+        }, h(Codicon, { name: "clear-all", size: 13 }))
+      )
+    ),
+
+    // 2. Settings Collapsible Section
+    showSettings && h("div", {
+      className: "p-2.5 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-2.5 text-xs",
+    },
+      h("div", { className: "space-y-1" },
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, LABELS.targetLangs),
+        h(Input, {
+          className: "h-7 text-xs",
+          value: targetDraft,
+          placeholder: "ru, en, de, zh",
+          onChange: (e) => setTargetDraft(e.target.value),
+        })
+      ),
+      h("div", { className: "space-y-1" },
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, "Режим перевода"),
+        h(Select, {
+          value: modeDraft,
+          onValueChange: (v) => setModeDraft(v),
+        },
+          h(SelectTrigger, { className: "h-7 text-xs w-full" },
+            h(SelectValue, { placeholder: "Выберите режим" })
+          ),
+          h(SelectContent, null,
+            h(SelectItem, { value: "auto" }, LABELS.modeAuto),
+            h(SelectItem, { value: "fast" }, LABELS.modeFast),
+            h(SelectItem, { value: "llm" }, LABELS.modeLlm)
+          )
+        )
+      ),
+      h("div", { className: "space-y-1" },
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, LABELS.theme),
+        h(Select, {
+          value: themeDraft,
+          onValueChange: (v) => {
+            setThemeDraft(v);
+            applyThemePreset(v);
+          },
+        },
+          h(SelectTrigger, { className: "h-7 text-xs w-full" },
+            h(SelectValue, { placeholder: "Выберите тему" })
+          ),
+          h(SelectContent, null,
+            THEME_PRESETS.map((p) => h(SelectItem, { key: p.id, value: p.id }, p.name))
+          )
+        )
+      ),
+      h("div", { className: "flex justify-end gap-2 pt-1" },
+        h(Button, {
+          size: "sm",
+          variant: "default",
+          onClick: () => {
+            patchSettings({ targets: targetDraft, engineMode: modeDraft });
+            setShowSettings(false);
+            host?.notify?.({ kind: "success", message: "Настройки перевода сохранены" });
+          },
+        }, LABELS.save),
+        h(Button, {
+          size: "sm",
+          variant: "ghost",
+          onClick: () => setShowSettings(false),
+        }, LABELS.close)
+      )
+    ),
+
+    // 3. Quick Input / Translate Field
+    h("div", { className: "space-y-1.5" },
+      h(Textarea, {
+        className: "text-xs resize-none font-sans",
+        style: { minHeight: "68px" },
+        placeholder: "Вставьте текст для перевода или нажмите Alt+T (буфер)...",
+        value: inputText,
+        onChange: (e) => setInputText(e.target.value),
+        onKeyDown: (e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            runManualTranslate();
+          }
+        },
       }),
+      h("div", { className: "flex justify-between items-center" },
+        h("span", { className: "text-[10px] text-[var(--ui-text-tertiary)]" }, "Ctrl+Enter или кнопка →"),
+        h(Button, {
+          size: "sm",
+          variant: "default",
+          disabled: translating || !inputText.trim(),
+          onClick: runManualTranslate,
+        },
+          translating ? [h(Loader, { key: "loader", className: "size-3 mr-1" }), "Перевод…"] : "Перевести"
+        )
+      )
+    ),
 
-      // 2. Settings Collapsible Section
-      showSettings &&
-        jsx("div", {
-          className: "p-2.5 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-2.5 text-xs",
-          children: [
-            jsx("div", {
-              className: "space-y-1",
-              children: [
-                jsx("label", { className: "font-medium text-[var(--ui-text-secondary)]", children: LABELS.targetLangs }),
-                jsx(Input, {
-                  className: "h-7 text-xs",
-                  value: targetDraft,
-                  placeholder: "ru, en, de, zh",
-                  onChange: (e) => setTargetDraft(e.target.value),
-                }),
-              ],
-            }),
-            jsx("div", {
-              className: "space-y-1",
-              children: [
-                jsx("label", { className: "font-medium text-[var(--ui-text-secondary)]", children: "Режим перевода" }),
-                jsx(
-                  Select,
-                  {
-                    value: modeDraft,
-                    onValueChange: (v) => setModeDraft(v),
-                  },
-                  [
-                    jsx(SelectTrigger, { className: "h-7 text-xs w-full" }, jsx(SelectValue, null)),
-                    jsx(SelectContent, null, [
-                      jsx(SelectItem, { value: "auto" }, LABELS.modeAuto),
-                      jsx(SelectItem, { value: "fast" }, LABELS.modeFast),
-                      jsx(SelectItem, { value: "llm" }, LABELS.modeLlm),
-                    ]),
-                  ],
-                ),
-              ],
-            }),
-            jsx("div", {
-              className: "space-y-1",
-              children: [
-                jsx("label", { className: "font-medium text-[var(--ui-text-secondary)]", children: LABELS.theme }),
-                jsx(
-                  Select,
-                  {
-                    value: themeDraft,
-                    onValueChange: (v) => {
-                      setThemeDraft(v);
-                      applyThemePreset(v);
-                    },
-                  },
-                  [
-                    jsx(SelectTrigger, { className: "h-7 text-xs w-full" }, jsx(SelectValue, null)),
-                    jsx(
-                      SelectContent,
-                      null,
-                      THEME_PRESETS.map((p) => jsx(SelectItem, { key: p.id, value: p.id }, p.name)),
-                    ),
-                  ],
-                ),
-              ],
-            }),
-            jsx("div", {
-              className: "flex justify-end gap-2 pt-1",
-              children: [
-                jsx(
-                  Button,
-                  {
-                    size: "sm",
-                    variant: "default",
-                    onClick: () => {
-                      patchSettings({ targets: targetDraft, engineMode: modeDraft });
-                      setShowSettings(false);
-                      host?.notify?.({ kind: "success", message: "Настройки перевода сохранены" });
-                    },
-                  },
-                  LABELS.save,
-                ),
-                jsx(
-                  Button,
-                  {
-                    size: "sm",
-                    variant: "ghost",
-                    onClick: () => setShowSettings(false),
-                  },
-                  LABELS.close,
-                ),
-              ],
-            }),
-          ],
-        }),
+    h(Separator, null),
 
-      // 3. Quick Input / Translate Field
-      jsx("div", {
-        className: "space-y-1.5",
-        children: [
-          jsx(Textarea, {
-            className: "text-xs resize-none font-sans",
-            style: { minHeight: "68px" },
-            placeholder: "Вставьте текст для перевода или нажмите Alt+T (буфер)...",
-            value: inputText,
-            onChange: (e) => setInputText(e.target.value),
-            onKeyDown: (e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                runManualTranslate();
-              }
+    // 4. History Feed
+    h("div", { className: "flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1" },
+      history.length === 0
+        ? h(EmptyState, {
+            title: LABELS.emptyPanel,
+            description: LABELS.emptyDesc,
+          })
+        : history.map((item) =>
+            h("div", {
+              key: item.id,
+              className: "p-2.5 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-1.5 text-xs",
             },
-          }),
-          jsx("div", {
-            className: "flex justify-between items-center",
-            children: [
-              jsx("span", {
-                className: "text-[10px] text-[var(--ui-text-tertiary)]",
-                children: "Ctrl+Enter или кнопка →",
-              }),
-              jsx(
-                Button,
-                {
-                  size: "sm",
-                  variant: "default",
-                  disabled: translating || !inputText.trim(),
-                  onClick: runManualTranslate,
-                },
-                translating ? [jsx(Loader, { key: "l", className: "size-3 mr-1" }), "Перевод…"] : "Перевести",
-              ),
-            ],
-          }),
-        ],
-      }),
-
-      jsx(Separator, null),
-
-      // 4. History Feed
-      jsx("div", {
-        className: "flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1",
-        children:
-          history.length === 0
-            ? jsx(EmptyState, {
-                title: LABELS.emptyPanel,
-                description: LABELS.emptyDesc,
-              })
-            : history.map((item) =>
-                jsx(
-                  "div",
-                  {
-                    key: item.id,
-                    className: "p-2.5 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-1.5 text-xs",
+              h("div", {
+                className: "flex items-center justify-between text-[10px] text-[var(--ui-text-tertiary)]",
+              },
+                h("span", {
+                  className: "font-mono font-semibold uppercase text-[var(--ui-accent)]",
+                }, item.detected ? `${item.detected} → ${item.results.map((r) => r.lang).join(", ")}` : "перевод"),
+                h("button", {
+                  className: "hermes-tr-btn-ghost text-[10px]",
+                  onClick: () => {
+                    const fullText = item.results.map((r) => `[${r.lang.toUpperCase()}]\n${r.text}`).join("\n\n");
+                    copyItemText(fullText, item.id);
                   },
-                  [
-                    // Item Header
-                    jsx("div", {
-                      className: "flex items-center justify-between text-[10px] text-[var(--ui-text-tertiary)]",
-                      children: [
-                        jsx("span", {
-                          className: "font-mono font-semibold uppercase text-[var(--ui-accent)]",
-                          children: item.detected ? `${item.detected} → ${item.results.map((r) => r.lang).join(", ")}` : "перевод",
-                        }),
-                        jsx(
-                          "button",
-                          {
-                            className: "hermes-tr-btn-ghost text-[10px]",
-                            onClick: () => {
-                              const fullText = item.results.map((r) => `[${r.lang.toUpperCase()}]\n${r.text}`).join("\n\n");
-                              copyItemText(fullText, item.id);
-                            },
-                          },
-                          copiedId === item.id ? "✓ Скопировано" : "Копировать всё",
-                        ),
-                      ],
-                    }),
-
-                    // Source preview
-                    jsx("div", {
-                      className: "line-clamp-2 italic text-[var(--ui-text-secondary)] opacity-80 border-l-2 border-[var(--ui-stroke-secondary)] pl-2",
-                      children: item.sourceText,
-                    }),
-
-                    // Translated targets
-                    jsx("div", {
-                      className: "space-y-1.5 pt-1",
-                      children: item.results.map((r, rIdx) =>
-                        jsx(
-                          "div",
-                          {
-                            key: rIdx,
-                            className: "p-1.5 rounded bg-[var(--background)] border border-[var(--ui-stroke-secondary)] cursor-pointer hover:border-[var(--ui-accent)] transition-colors",
-                            onClick: () => copyItemText(r.text, `${item.id}-${r.lang}`),
-                            title: "Клик — копировать",
-                          },
-                          [
-                            jsx("div", {
-                              className: "flex justify-between items-center text-[10px] font-semibold text-[var(--ui-accent)] mb-0.5",
-                              children: [
-                                jsx("span", { children: r.lang.toUpperCase() }),
-                                jsx("div", {
-                                  className: "flex items-center gap-1",
-                                  children: [
-                                    r.engineUsed === "llm" &&
-                                      jsx(Badge, { variant: "outline", className: "text-[8px] py-0 px-1" }, "LLM"),
-                                    jsx("span", {
-                                      className: "text-[9px] text-[var(--ui-text-tertiary)]",
-                                      children: copiedId === `${item.id}-${r.lang}` ? "✓" : "копия",
-                                    }),
-                                  ],
-                                }),
-                              ],
-                            }),
-                            jsx("div", {
-                              className: "whitespace-pre-wrap leading-relaxed text-[var(--ui-text-primary)]",
-                              children: r.error
-                                ? jsx("span", { className: "text-[#f0a35e]", children: r.error })
-                                : r.text,
-                            }),
-                          ],
-                        ),
-                      ),
-                    }),
-                  ],
-                ),
+                }, copiedId === item.id ? "✓ Скопировано" : "Копировать всё")
               ),
-      }),
-    ],
-  });
+              h("div", {
+                className: "line-clamp-2 italic text-[var(--ui-text-secondary)] opacity-80 border-l-2 border-[var(--ui-stroke-secondary)] pl-2",
+              }, item.sourceText),
+              h("div", { className: "space-y-1.5 pt-1" },
+                item.results.map((r, rIdx) =>
+                  h("div", {
+                    key: rIdx,
+                    className: "p-1.5 rounded bg-[var(--background)] border border-[var(--ui-stroke-secondary)] cursor-pointer hover:border-[var(--ui-accent)] transition-colors",
+                    onClick: () => copyItemText(r.text, `${item.id}-${r.lang}`),
+                    title: "Клик — копировать",
+                  },
+                    h("div", {
+                      className: "flex justify-between items-center text-[10px] font-semibold text-[var(--ui-accent)] mb-0.5",
+                    },
+                      h("span", null, r.lang.toUpperCase()),
+                      h("div", { className: "flex items-center gap-1" },
+                        r.engineUsed === "llm" && h(Badge, { variant: "outline", className: "text-[8px] py-0 px-1" }, "LLM"),
+                        h("span", { className: "text-[9px] text-[var(--ui-text-tertiary)]" },
+                          copiedId === `${item.id}-${r.lang}` ? "✓" : "копия"
+                        )
+                      )
+                    ),
+                    h("div", {
+                      className: "whitespace-pre-wrap leading-relaxed text-[var(--ui-text-primary)]",
+                    }, r.error ? h("span", { className: "text-[#f0a35e]" }, r.error) : r.text)
+                  )
+                )
+              )
+            )
+          )
+    )
+  );
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1466,7 +1299,6 @@ async function translateClipboard() {
         detected: output.detected,
         results: output.results,
       });
-      // Copy primary translated result directly to clipboard
       const primary = output.results.find((r) => r.text);
       if (primary) {
         writeClipboardText(primary.text);
@@ -1482,7 +1314,6 @@ async function translateClipboard() {
 }
 
 async function translateLastAssistantMessage() {
-  // Find last assistant message in DOM
   const assistantEls = document.querySelectorAll('[data-role="assistant"], .assistant-message, .prose');
   let targetText = "";
 
@@ -1538,21 +1369,18 @@ async function translateLastAssistantMessage() {
 
 function setupGlobalHotkeys() {
   const onKeyDown = (e) => {
-    // Alt+T: Translate clipboard
     if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyT") {
       e.preventDefault();
       translateClipboard();
       return;
     }
 
-    // Alt+Shift+T: Translate last assistant message
     if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyT") {
       e.preventDefault();
       translateLastAssistantMessage();
       return;
     }
 
-    // Alt+P: Toggle persistent side panel
     if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyP") {
       e.preventDefault();
       panelOpenAtom.set(!panelOpenAtom.get());
@@ -1576,27 +1404,23 @@ export default {
     _storage = ctx.storage;
     _os = ctx.os || null;
 
-    // Load persisted settings
     const initialSettings = loadSettings(ctx.storage);
     settingsAtom.set(initialSettings);
 
-    // 1. Register global SelectionPopupHost via statusbar right
     ctx.register({
       id: "selection-popup-host",
       area: STATUSBAR_AREAS.right,
-      render: () => jsx(SelectionPopupHost, null),
+      render: () => h(SelectionPopupHost, null),
     });
 
-    // 2. Register persistent Layout Pane (right rail sidebar)
     ctx.register({
       id: "pane",
       area: PANES_AREA,
       title: "Перевод",
       data: { placement: "right", width: "340px" },
-      render: () => jsx(TranslationPane, { ctx }),
+      render: () => h(TranslationPane, { ctx }),
     });
 
-    // 3. Register Palette Commands
     ctx.register({
       id: "palette.translate-clipboard",
       area: PALETTE_AREA,
@@ -1630,10 +1454,8 @@ export default {
       },
     });
 
-    // 4. Setup global hotkeys listener
     const removeHotkeys = setupGlobalHotkeys();
 
-    // 5. Cleanup on dispose
     ctx.onDispose(() => {
       removeHotkeys();
       const styleEl = document.getElementById("hermes-translate-selection-styles");

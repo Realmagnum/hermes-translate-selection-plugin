@@ -15,6 +15,15 @@ function getSandbox() {
       return { get: () => val, set: (v) => { val = v; } };
     };
     let host = null;
+    const React = {
+      createElement: () => ({}),
+      useState: () => [null, () => {}],
+      useEffect: () => {},
+      useRef: () => ({ current: null }),
+      useCallback: (fn) => fn,
+      useLayoutEffect: () => {},
+      useMemo: (fn) => fn(),
+    };
 
     ${pluginSrc
       .split("/* ══════════════════════════════════════════════════════════════════════════\n   5. UI UTILITIES")[0]
