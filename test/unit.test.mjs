@@ -31,13 +31,16 @@ function getSandbox() {
 
     return {
       detectScriptLanguage,
+      refineDetectedLanguage,
       targetLangName,
       shieldTokens,
       unshieldTokens,
       isComplexFormattedText,
       cleanLlmOutput,
+      formatEngineBadge,
       DEFAULT_SETTINGS,
-      THEME_PRESETS
+      THEME_PRESETS,
+      LOCALES
     };
   `;
   return new Function(code)();
@@ -52,6 +55,36 @@ test("detectScriptLanguage identifies scripts correctly", () => {
   assert.equal(sandbox.detectScriptLanguage("こんにちは"), "ja");
   assert.equal(sandbox.detectScriptLanguage("안녕하세요"), "ko");
   assert.equal(sandbox.detectScriptLanguage("مرحبا"), "ar");
+});
+
+test("refineDetectedLanguage prioritizes Russian over false Belarusian/Ukrainian detection", () => {
+  // Case: Google MT incorrectly tags single Cyrillic word "правая" as Belarusian "be"
+  assert.equal(
+    sandbox.refineDetectedLanguage("правая", "be", ["ru", "en"]),
+    "ru"
+  );
+  assert.equal(
+    sandbox.refineDetectedLanguage("рендерятся", "uk", ["ru", "en"]),
+    "ru"
+  );
+  // Case: word with unique Belarusian letter 'ў' stays Belarusian
+  assert.equal(
+    sandbox.refineDetectedLanguage("ўсё добра", "be", ["ru", "en"]),
+    "be"
+  );
+  // Case: word with unique Ukrainian letter 'ї' stays Ukrainian
+  assert.equal(
+    sandbox.refineDetectedLanguage("Київ", "uk", ["ru", "en"]),
+    "uk"
+  );
+});
+
+test("formatEngineBadge returns clean badge labels and tones", () => {
+  assert.deepEqual(sandbox.formatEngineBadge("gtx"), { label: "Google", tone: "google" });
+  assert.deepEqual(sandbox.formatEngineBadge("dict-chrome-ex"), { label: "Google", tone: "google" });
+  assert.deepEqual(sandbox.formatEngineBadge("google"), { label: "Google", tone: "google" });
+  assert.deepEqual(sandbox.formatEngineBadge("llm"), { label: "LLM", tone: "llm" });
+  assert.deepEqual(sandbox.formatEngineBadge("mymemory"), { label: "MyMemory", tone: "mymemory" });
 });
 
 test("targetLangName resolves localized language names", () => {
@@ -113,10 +146,14 @@ test("cleanLlmOutput strips conversational prefix and markdown code wrappers", (
   assert.equal(sandbox.cleanLlmOutput(output3, "# Header\nText"), "# Заголовок\nТекст");
 });
 
-test("DEFAULT_SETTINGS and THEME_PRESETS are properly structured", () => {
+test("DEFAULT_SETTINGS, LOCALES and THEME_PRESETS are properly structured", () => {
   assert.equal(sandbox.DEFAULT_SETTINGS.engineMode, "auto");
   assert.equal(sandbox.DEFAULT_SETTINGS.targets, "ru, en");
+  assert.equal(sandbox.DEFAULT_SETTINGS.autoPopup, true);
+  assert.equal(sandbox.DEFAULT_SETTINGS.debounceMs, 280);
   assert.ok(sandbox.THEME_PRESETS.length >= 5);
   assert.ok(sandbox.THEME_PRESETS.some((p) => p.id === "amber"));
   assert.ok(sandbox.THEME_PRESETS.some((p) => p.id === "midnight"));
+  assert.ok(Object.keys(sandbox.LOCALES.en).length > 20);
+  assert.equal(Object.keys(sandbox.LOCALES.en).length, Object.keys(sandbox.LOCALES.ru).length);
 });

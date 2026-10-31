@@ -8,7 +8,7 @@
  * - Automatic fail-safe fallback to Token-Shielded MT if LLM times out or errors
  *
  * Fully self-contained ECMAScript Module (ESM) compatible with Hermes Desktop plugin loader.
- * Uses standard React.createElement (h) to ensure full runtime reliability without JSX transpilation.
+ * Uses standard React.createElement (h) and ctx.i18n / usePluginI18n for reactive multilang support.
  *
  * @module hermes-translate-selection-plugin
  * @author Realmagnum
@@ -16,12 +16,11 @@
  */
 
 import React from "react";
-
-const { useState, useEffect, useRef, useCallback, useLayoutEffect, useMemo } = React;
 import {
   host,
   atom,
   useValue,
+  usePluginI18n,
   Button,
   Input,
   Textarea,
@@ -42,11 +41,11 @@ import {
   STATUSBAR_AREAS,
 } from "@hermes/plugin-sdk";
 
-// Shorthand for React.createElement
+const { useState, useEffect, useRef, useCallback, useLayoutEffect, useMemo } = React;
 const h = React.createElement;
 
 /* ══════════════════════════════════════════════════════════════════════════
-   1. CONSTANTS & THEMES
+   1. CONSTANTS, THEMES & LOCALIZATION
    ══════════════════════════════════════════════════════════════════════════ */
 
 const PLUGIN_ID = "translate-selection";
@@ -55,25 +54,29 @@ const STORAGE_KEY = "translate-selection.v1";
 const POPUP_CLASS = "hermes-translate-popup";
 
 const DEFAULT_SETTINGS = {
-  engineMode: "auto", // 'auto' | 'fast' | 'llm'
-  llmTimeoutMs: 3500,
-  maxHeight: 420,
-  targets: "ru, en",
-  clearance: 52,
+  autoPopup: true,           // Quick toggle for mouse selection popup
+  engineMode: "auto",        // 'auto' | 'fast' | 'llm'
+  targets: "ru, en",         // Target languages
+  debounceMs: 280,           // Debounce delay to prevent premature triggers
+  historyMode: "all",        // 'all' | 'latest' | 'off'
+  historyLimit: 50,          // Max items in history
+  llmTimeoutMs: 3500,        // Max wait for LLM before MT fallback
+  maxChars: 1500,            // Character truncation threshold
+  maxHeight: 420,            // Popup height cap
+  maxWidth: 560,             // Popup width cap
+  fontSize: 12.5,            // Popup font size
+  clearance: 52,             // Viewport clearance
+  dropSourceLang: true,      // Suppress target language matching detected source
+  themePreset: "amber",      // Active color preset
   bgColor: "#2b220a",
   bgOpacity: 97,
   textColor: "#ffd75e",
   accentColor: "#c9a83f",
   borderRadius: 10,
-  fontSize: 12.5,
-  maxWidth: 560,
-  debounceMs: 140,
-  maxChars: 1500,
-  dropSourceLang: true,
-  themePreset: "amber",
   keyClipboard: "alt+t",
   keyLastTurn: "alt+shift+t",
   keyPanel: "alt+p",
+  keyToggle: "alt+shift+o",
 };
 
 const THEME_PRESETS = [
@@ -119,6 +122,107 @@ const THEME_PRESETS = [
   },
 ];
 
+const LOCALES = {
+  en: {
+    loading: "Translating…",
+    failed: "Translation failed",
+    truncated: "Truncated",
+    copy: "Click to copy",
+    copied: "✓ Copied to clipboard",
+    copyAll: "Copy all",
+    emptyPanel: "Select text in chat",
+    emptyDesc: "Instant translation results will appear here.",
+    panelTitle: "Translation",
+    clearHistory: "Clear history",
+    closePanel: "Close panel",
+    openPanel: "Panel",
+    hidePanel: "Hide panel",
+    settings: "Settings",
+    save: "Save",
+    saved: "Settings saved",
+    close: "Close",
+    targetLangs: "Target languages (comma-separated)",
+    engineMode: "Engine mode",
+    modeAuto: "Auto (Smart Hybrid)",
+    modeFast: "Fast MT Only (no LLM)",
+    modeLlm: "Session LLM Only",
+    theme: "Color theme",
+    debounceMs: "Selection debounce delay",
+    historyMode: "History mode",
+    historyAll: "Full history (up to 50)",
+    historyLatest: "Keep latest only",
+    historyOff: "Disabled",
+    autoPopup: "Auto-popup on selection",
+    enabled: "Enabled",
+    disabled: "Disabled",
+    statusChipOn: "Translate: On",
+    statusChipOff: "Translate: Paused",
+    statusChipTip: "Click: toggle auto-popup on selection (Alt+Shift+O)",
+    original: "Original",
+    manualInputPlaceholder: "Paste text to translate (Ctrl+Enter to send)...",
+    translateBtn: "Translate",
+    fontSize: "Font size",
+    maxChars: "Character limit",
+    llmTimeout: "LLM timeout (ms)",
+    sourceProvider: "Source",
+    historyCleared: "History cleared",
+  },
+  ru: {
+    loading: "Перевод…",
+    failed: "Не удалось перевести",
+    truncated: "Обрезано",
+    copy: "Клик — копировать",
+    copied: "✓ Скопировано в буфер",
+    copyAll: "Копировать всё",
+    emptyPanel: "Выделите любой текст в чате",
+    emptyDesc: "Результаты мгновенного перевода отобразятся здесь.",
+    panelTitle: "Перевод",
+    clearHistory: "Очистить историю",
+    closePanel: "Закрыть панель",
+    openPanel: "Панель",
+    hidePanel: "Скрыть панель",
+    settings: "Настройки",
+    save: "Сохранить",
+    saved: "Настройки сохранены",
+    close: "Закрыть",
+    targetLangs: "Целевые языки (через запятую)",
+    engineMode: "Режим перевода",
+    modeAuto: "Auto (Smart Hybrid)",
+    modeFast: "Fast MT Only (без LLM)",
+    modeLlm: "Session LLM Only",
+    theme: "Цветовая тема",
+    debounceMs: "Задержка выделения",
+    historyMode: "Режим истории",
+    historyAll: "Вся история (до 50)",
+    historyLatest: "Только последний",
+    historyOff: "Отключена",
+    autoPopup: "Авто-всплывание при выделении",
+    enabled: "Включен",
+    disabled: "Выключен",
+    statusChipOn: "Перевод: Вкл",
+    statusChipOff: "Перевод: Пауза",
+    statusChipTip: "Клик: включить / выключить автоперевод (Alt+Shift+O)",
+    original: "Оригинал",
+    manualInputPlaceholder: "Вставьте текст для перевода (Ctrl+Enter для отправки)...",
+    translateBtn: "Перевести",
+    fontSize: "Размер шрифта",
+    maxChars: "Лимит символов",
+    llmTimeout: "Таймаут LLM (мс)",
+    sourceProvider: "Источник",
+    historyCleared: "История очищена",
+  },
+};
+
+function useTranslate() {
+  try {
+    if (typeof usePluginI18n === "function") {
+      const t = usePluginI18n(PLUGIN_ID);
+      if (typeof t === "function") return t;
+    }
+  } catch {}
+  return (key) => LOCALES.ru[key] || LOCALES.en[key] || key;
+}
+
 const LANGUAGE_NAMES = {
   ru: "Russian",
   en: "English",
@@ -145,26 +249,6 @@ const LANGUAGE_NAMES = {
   vi: "Vietnamese",
   th: "Thai",
   id: "Indonesian",
-};
-
-const LABELS = {
-  loading: "Перевод…",
-  failed: "Не удалось перевести",
-  truncated: "Обрезано",
-  copy: "Клик — копировать",
-  copied: "✓ Скопировано в буфер",
-  emptyPanel: "Выделите любой текст в чате",
-  emptyDesc: "Результаты мгновенного перевода отобразятся здесь.",
-  history: "История переводов",
-  clearHistory: "Очистить историю",
-  modeAuto: "Auto (Smart Hybrid)",
-  modeFast: "Fast MT Only (без LLM)",
-  modeLlm: "Session LLM Only",
-  targetLangs: "Целевые языки (через запятую)",
-  theme: "Цветовая тема",
-  settings: "Настройки",
-  save: "Сохранить",
-  close: "Закрыть",
 };
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -202,18 +286,51 @@ function patchSettings(patch) {
 }
 
 function addHistoryEntry(entry) {
+  const cfg = settingsAtom.get();
+  if (cfg.historyMode === "off") return;
+
   const list = historyAtom.get();
-  const next = [
-    { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), time: new Date(), ...entry },
-    ...list.slice(0, 49),
-  ];
-  historyAtom.set(next);
+  const normalizedText = (entry.sourceText || "").trim();
+  if (!normalizedText) return;
+
+  // 1. Prevent duplicate translations on repeated right-clicks or re-clicks
+  if (list.length > 0 && (list[0].sourceText || "").trim() === normalizedText) {
+    return;
+  }
+
+  // 2. Coalescing: if previous entry was created within 1.8s AND was a single word prefix of current text
+  // (e.g. user double-clicked first word, then dragged to select the full sentence)
+  let updatedList = list;
+  if (
+    list.length > 0 &&
+    Date.now() - new Date(list[0].time).getTime() < 1800 &&
+    normalizedText.startsWith((list[0].sourceText || "").trim())
+  ) {
+    updatedList = list.slice(1);
+  }
+
+  const newEntry = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
+    time: new Date(),
+    ...entry,
+  };
+
+  if (cfg.historyMode === "latest") {
+    historyAtom.set([newEntry]);
+  } else {
+    const limit = cfg.historyLimit || 50;
+    historyAtom.set([newEntry, ...updatedList.slice(0, limit - 1)]);
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
    3. LANGUAGE HEURISTICS & TOKEN SHIELDING
    ══════════════════════════════════════════════════════════════════════════ */
 
+/**
+ * Script & Cyrillic language detection with Russian priority for ambiguous Slavic words.
+ * Prevents words like "правая" from falsely detecting as Belarusian (be) or Ukrainian (uk).
+ */
 function detectScriptLanguage(text) {
   if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(text)) return "zh";
   if (/[\u3040-\u30ff]/.test(text)) return "ja";
@@ -224,6 +341,31 @@ function detectScriptLanguage(text) {
   if (/[\u0370-\u03ff]/.test(text)) return "el";
   if (/[\u0590-\u05ff]/.test(text)) return "he";
   return "en";
+}
+
+function refineDetectedLanguage(text, rawDetected, targetLangs) {
+  const normDetected = (rawDetected || "").toLowerCase().split("-")[0];
+
+  if (/[а-яё]/i.test(text)) {
+    // Check for distinctive non-Russian Cyrillic characters
+    const hasUk = /[іїєґ]/i.test(text);
+    const hasBe = /[ў]/i.test(text);
+    const hasSouthSlavic = /[ђјљњћџѓѕ]/i.test(text);
+
+    // If pure Russian Cyrillic without distinctive Ukrainian/Belarusian letters:
+    if (!hasUk && !hasBe && !hasSouthSlavic) {
+      if (["be", "uk", "bg", "mk", "sr"].includes(normDetected) || !normDetected) {
+        return "ru";
+      }
+    } else if (hasBe && !hasUk) {
+      return "be";
+    } else if (hasUk) {
+      return "uk";
+    }
+    return normDetected || "ru";
+  }
+
+  return normDetected || detectScriptLanguage(text);
 }
 
 function targetLangName(code) {
@@ -284,6 +426,17 @@ function isComplexFormattedText(raw) {
   return false;
 }
 
+function formatEngineBadge(engineUsed) {
+  if (!engineUsed) return { label: "Google", tone: "google" };
+  const lower = String(engineUsed).toLowerCase();
+  if (lower === "llm") return { label: "LLM", tone: "llm" };
+  if (lower === "mymemory") return { label: "MyMemory", tone: "mymemory" };
+  if (lower === "gtx" || lower === "dict-chrome-ex" || lower === "google") {
+    return { label: "Google", tone: "google" };
+  }
+  return { label: engineUsed.toUpperCase(), tone: "default" };
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    4. TRANSLATION ENGINES (MT + LLM ONESHOT)
    ══════════════════════════════════════════════════════════════════════════ */
@@ -334,7 +487,7 @@ async function fetchGoogle(text, to, clientName, signal) {
 
   if (!translated) throw new Error("Empty translation from Google MT");
   const detected = Array.isArray(body) && typeof body[2] === "string" ? body[2] : "";
-  return { text: translated, detected, engineUsed: clientName };
+  return { text: translated, detected, engineUsed: "google" };
 }
 
 async function fetchMyMemory(text, to, signal) {
@@ -454,12 +607,12 @@ async function executeTranslate(input, signal) {
   const isComplex = isComplexFormattedText(rawText);
   const shouldTryLlm = mode === "llm" || (mode === "auto" && isComplex);
 
-  const detectedSource = detectScriptLanguage(rawText);
+  const scriptGuess = detectScriptLanguage(rawText);
   const dropSource = input.dropSourceLang !== false;
-  const activeTargets = dropSource
-    ? targets.filter((t) => t.toLowerCase().split("-")[0] !== detectedSource)
+  const initialTargets = dropSource
+    ? targets.filter((t) => t.toLowerCase().split("-")[0] !== scriptGuess)
     : targets;
-  const targetsToTranslate = activeTargets.length > 0 ? activeTargets : targets;
+  const targetsToTranslate = initialTargets.length > 0 ? initialTargets : targets;
 
   // 1. LLM Translation Path
   if (shouldTryLlm) {
@@ -477,7 +630,7 @@ async function executeTranslate(input, signal) {
             input.llmTimeoutMs,
             signal,
           );
-          const entry = { text: translatedText, detected: detectedSource, engineUsed: "llm" };
+          const entry = { text: translatedText, detected: scriptGuess, engineUsed: "llm" };
           rememberCache(cacheKey, entry);
           return entry;
         }),
@@ -492,12 +645,12 @@ async function executeTranslate(input, signal) {
           }
           return { lang, text: "", error: r.reason?.message || String(r.reason) };
         });
-        return { detected: detectedSource, results };
+        return { detected: scriptGuess, results };
       }
 
       if (mode === "llm") {
         return {
-          detected: detectedSource,
+          detected: scriptGuess,
           results: targetsToTranslate.map((lang) => ({
             lang,
             text: "",
@@ -508,7 +661,7 @@ async function executeTranslate(input, signal) {
     } catch (llmErr) {
       if (mode === "llm") {
         return {
-          detected: detectedSource,
+          detected: scriptGuess,
           results: targetsToTranslate.map((lang) => ({
             lang,
             text: "",
@@ -526,10 +679,13 @@ async function executeTranslate(input, signal) {
     targetsToTranslate.map((lang) => translateWithMtFallback(shielded, lang, signal)),
   );
 
-  const detected =
+  const rawDetected =
     settled
       .map((result) => (result.status === "fulfilled" ? result.value.detected : ""))
-      .find(Boolean) || detectedSource;
+      .find(Boolean) || scriptGuess;
+
+  // Refine detected language to ensure Russian Cyrillic words aren't misclassified as Belarusian
+  const detected = refineDetectedLanguage(rawText, rawDetected, targets);
 
   const results = settled.map((result, index) => {
     const lang = targetsToTranslate[index] ?? "";
@@ -598,7 +754,7 @@ function ensurePopupStyles(settings) {
       display: flex;
       gap: 8px;
       align-items: baseline;
-      padding: 3px 5px;
+      padding: 3px 6px;
       border-radius: 6px;
       cursor: pointer;
       transition: background 0.1s ease;
@@ -607,10 +763,12 @@ function ensurePopupStyles(settings) {
       background: rgba(255, 255, 255, 0.08);
     }
     .hermes-tr-code {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
       padding: 1px 4px;
-      border-radius: 3px;
-      background: rgba(128, 128, 128, 0.2);
+      border-radius: 4px;
+      background: rgba(128, 128, 128, 0.18);
+      border: 1px solid var(--ui-stroke-secondary, rgba(128, 128, 128, 0.25));
+      color: var(--ui-accent, #38bdf8);
       font-size: 0.9em;
     }
     .hermes-tr-btn-ghost {
@@ -623,10 +781,48 @@ function ensurePopupStyles(settings) {
       gap: 4px;
       padding: 2px 6px;
       border-radius: 4px;
+      font-size: 11px;
+      transition: all 0.1s ease;
     }
     .hermes-tr-btn-ghost:hover {
       color: var(--ui-text-primary);
-      background: rgba(128, 128, 128, 0.15);
+      background: var(--chrome-action-hover, rgba(128, 128, 128, 0.15));
+    }
+    .hermes-tr-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
+    .hermes-tr-badge-google {
+      background: rgba(66, 133, 244, 0.16);
+      color: #60a5fa;
+      border: 1px solid rgba(66, 133, 244, 0.3);
+    }
+    .hermes-tr-badge-llm {
+      background: rgba(234, 179, 8, 0.16);
+      color: #facc15;
+      border: 1px solid rgba(234, 179, 8, 0.35);
+    }
+    .hermes-tr-badge-mymemory {
+      background: rgba(168, 85, 247, 0.16);
+      color: #c084fc;
+      border: 1px solid rgba(168, 85, 247, 0.3);
+    }
+    .hermes-tr-card {
+      border-radius: var(--radius-lg, 8px);
+      border: 1px solid var(--ui-stroke-secondary, rgba(128, 128, 128, 0.22));
+      background: var(--card, var(--ui-bg-elevated, rgba(255, 255, 255, 0.04)));
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+      transition: border-color 0.15s ease;
+    }
+    .hermes-tr-card:hover {
+      border-color: var(--ui-accent, rgba(128, 128, 128, 0.4));
     }
   `;
   document.head.appendChild(s);
@@ -694,6 +890,9 @@ function isEditableElement(node) {
 
 function SelectionPopupHost() {
   const settings = useValue(settingsAtom);
+  const panelOpen = useValue(panelOpenAtom);
+  const t = useTranslate();
+
   const [view, setView] = useState(null);
   const [copied, setCopied] = useState(false);
 
@@ -753,7 +952,7 @@ function SelectionPopupHost() {
           results: output.results,
           detected: output.detected,
           loading: false,
-          error: output.results.length === 0 ? LABELS.failed : undefined,
+          error: output.results.length === 0 ? t("failed") : undefined,
         });
 
         if (output.results && output.results.length > 0) {
@@ -776,11 +975,14 @@ function SelectionPopupHost() {
         });
       }
     },
-    [],
+    [t],
   );
 
   const readSelection = useCallback(() => {
     const currentCfg = settingsAtom.get();
+    // Quick toggle: do nothing if auto-popup is disabled
+    if (currentCfg.autoPopup === false) return;
+
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
 
@@ -821,10 +1023,17 @@ function SelectionPopupHost() {
   useEffect(() => {
     ensurePopupStyles(settings);
 
+    // Left click only: button 0
     const onMouseUp = (e) => {
+      if (e.button !== 0) return;
       if (rootRef.current && e.target instanceof Node && rootRef.current.contains(e.target)) return;
       clearTimeout(debounceTimerRef.current);
-      debounceTimerRef.current = setTimeout(readSelection, settingsAtom.get().debounceMs || 140);
+      debounceTimerRef.current = setTimeout(readSelection, settingsAtom.get().debounceMs || 280);
+    };
+
+    // Ignore right-click context menu triggers
+    const onContextMenu = () => {
+      clearTimeout(debounceTimerRef.current);
     };
 
     const onMouseDown = (e) => {
@@ -836,11 +1045,19 @@ function SelectionPopupHost() {
       if (e.key === "Escape") hide();
     };
 
-    const onScrollOrResize = () => {
-      if (!pinnedRef.current) hide();
+    // Scroll handling: DO NOT hide if user is scrolling inside sidebar or popup!
+    const onScrollOrResize = (e) => {
+      if (pinnedRef.current) return;
+      if (e && e.target instanceof Element) {
+        if (e.target.closest?.(`.${POPUP_CLASS}`) || e.target.closest?.(".hermes-translate-panel")) {
+          return;
+        }
+      }
+      hide();
     };
 
     document.addEventListener("mouseup", onMouseUp, true);
+    document.addEventListener("contextmenu", onContextMenu, true);
     document.addEventListener("mousedown", onMouseDown, true);
     document.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("scroll", onScrollOrResize, true);
@@ -848,6 +1065,7 @@ function SelectionPopupHost() {
 
     return () => {
       document.removeEventListener("mouseup", onMouseUp, true);
+      document.removeEventListener("contextmenu", onContextMenu, true);
       document.removeEventListener("mousedown", onMouseDown, true);
       document.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("scroll", onScrollOrResize, true);
@@ -920,8 +1138,8 @@ function SelectionPopupHost() {
       className: "hermes-tr-row",
       style: { color: settings.accentColor, gap: "8px" },
     },
-      h(Loader, { className: "size-3", label: LABELS.loading }),
-      h("span", null, LABELS.loading)
+      h(Loader, { className: "size-3", label: t("loading") }),
+      h("span", null, t("loading"))
     ),
 
     !view.loading && view.error && h("div", {
@@ -929,14 +1147,15 @@ function SelectionPopupHost() {
       style: { color: "#f0a35e", gap: "8px" },
     },
       h("span", { style: langTagStyle }, "!"),
-      h("span", null, `${LABELS.failed}: ${view.error}`)
+      h("span", null, `${t("failed")}: ${view.error}`)
     ),
 
-    !view.loading && !view.error && (view.results || []).map((result, idx) =>
-      h("div", {
+    !view.loading && !view.error && (view.results || []).map((result, idx) => {
+      const badge = formatEngineBadge(result.engineUsed);
+      return h("div", {
         key: idx,
         className: "hermes-tr-row",
-        title: "Нажмите, чтобы скопировать",
+        title: t("copy"),
         onClick: () => {
           if (!result.text) return;
           writeClipboardText(result.text);
@@ -953,36 +1172,30 @@ function SelectionPopupHost() {
           },
         },
           h("span", { style: langTagStyle }, result.lang),
-          result.engineUsed === "llm" && h("span", {
-            style: {
-              fontSize: "8px",
-              fontWeight: "700",
-              padding: "0 3px",
-              borderRadius: "3px",
-              background: "rgba(255, 215, 94, 0.18)",
-              color: settings.accentColor,
-              letterSpacing: "0.05em",
-              lineHeight: "1.2",
-            },
-          }, "LLM")
+          h("span", {
+            className: `hermes-tr-badge hermes-tr-badge-${badge.tone}`,
+          }, badge.label)
         ),
         h("div", { style: { flex: 1, minWidth: 0 } },
           result.error
             ? h("span", { style: { color: "#f0a35e" } }, result.error)
             : h(FormattedTranslation, { text: result.text, settings })
         )
-      )
-    ),
+      );
+    }),
 
     h("div", { style: metaStyle },
-      h("span", null, copied ? LABELS.copied : `${LABELS.copy}${view.truncated ? ` · ${LABELS.truncated}` : ""}`),
+      h("span", null, copied ? t("copied") : `${t("copy")}${view.truncated ? ` · ${t("truncated")}` : ""}`),
       h("button", {
         className: "hermes-tr-btn-ghost",
-        onClick: () => panelOpenAtom.set(true),
-        title: "Открыть в боковой панели",
+        onClick: () => {
+          const next = !panelOpenAtom.get();
+          panelOpenAtom.set(next);
+        },
+        title: panelOpen ? t("hidePanel") : t("openPanel"),
       },
         h(Codicon, { name: "layout-sidebar-right", size: 12 }),
-        "Панель"
+        panelOpen ? t("hidePanel") : t("openPanel")
       )
     )
   );
@@ -995,21 +1208,36 @@ function SelectionPopupHost() {
 function TranslationPane({ ctx }) {
   const settings = useValue(settingsAtom);
   const history = useValue(historyAtom);
+  const t = useTranslate();
+
   const [inputText, setInputText] = useState("");
   const [translating, setTranslating] = useState(false);
   const [copiedId, setCopiedId] = useState("");
   const [showSettings, setShowSettings] = useState(false);
 
+  // Settings form draft state
   const [targetDraft, setTargetDraft] = useState(settings.targets);
   const [modeDraft, setModeDraft] = useState(settings.engineMode);
   const [themeDraft, setThemeDraft] = useState(settings.themePreset || "amber");
+  const [debounceDraft, setDebounceDraft] = useState(String(settings.debounceMs || 280));
+  const [historyModeDraft, setHistoryModeDraft] = useState(settings.historyMode || "all");
+  const [autoPopupDraft, setAutoPopupDraft] = useState(settings.autoPopup !== false);
+
+  const historyListRef = useRef(null);
+
+  // Auto-scroll to top when a new translation card arrives
+  useEffect(() => {
+    if (historyListRef.current) {
+      historyListRef.current.scrollTo({ top: 0, behavior: "smooth" });
+    }
+  }, [history]);
 
   const runManualTranslate = async () => {
     if (!inputText.trim()) return;
     setTranslating(true);
     const targets = settings.targets
       .split(/[,;\s]+/)
-      .map((t) => t.trim().toLowerCase())
+      .map((item) => item.trim().toLowerCase())
       .filter(Boolean);
 
     const focusedSid =
@@ -1036,7 +1264,7 @@ function TranslationPane({ ctx }) {
         });
       }
     } catch (e) {
-      host?.notify?.({ kind: "error", message: `Ошибка перевода: ${e.message || String(e)}` });
+      host?.notify?.({ kind: "error", message: `${t("failed")}: ${e.message || String(e)}` });
     } finally {
       setTranslating(false);
     }
@@ -1060,8 +1288,17 @@ function TranslationPane({ ctx }) {
     setTimeout(() => setCopiedId(""), 2000);
   };
 
+  const closeSidebar = () => {
+    panelOpenAtom.set(false);
+    if (ctx && typeof ctx.runAction === "function") {
+      try {
+        ctx.runAction("view.toggleRightSidebar");
+      } catch {}
+    }
+  };
+
   return h("div", {
-    className: "flex flex-col h-full overflow-hidden p-3 space-y-3",
+    className: "hermes-translate-panel flex flex-col h-full overflow-hidden p-3 space-y-3",
     style: {
       color: "var(--ui-text-primary)",
       fontFamily: "var(--font-sans, inherit)",
@@ -1076,34 +1313,61 @@ function TranslationPane({ ctx }) {
         className: "flex items-center gap-1.5 font-semibold text-xs tracking-wide uppercase",
       },
         h(Codicon, { name: "globe", size: 14 }),
-        "Перевод",
+        t("panelTitle"),
         h(Badge, {
           variant: settings.engineMode === "llm" ? "default" : "outline",
           className: "ml-1 text-[10px]",
-        }, settings.engineMode.toUpperCase())
+        }, settings.engineMode.toUpperCase()),
+        h("button", {
+          className: "hermes-tr-btn-ghost text-[10px] ml-1",
+          style: { padding: "1px 4px" },
+          title: t("statusChipTip"),
+          onClick: () => {
+            const next = !settings.autoPopup;
+            patchSettings({ autoPopup: next });
+            setAutoPopupDraft(next);
+            host?.notify?.({ kind: "info", message: `${t("autoPopup")}: ${next ? t("enabled") : t("disabled")}` });
+          },
+        },
+          h(Codicon, { name: settings.autoPopup ? "check" : "circle-slash", size: 11 }),
+          settings.autoPopup ? "Авто" : "Пауза"
+        )
       ),
       h("div", { className: "flex items-center gap-1" },
         h(Button, {
           size: "sm",
           variant: showSettings ? "default" : "ghost",
-          title: "Настройки плагина",
+          className: "size-7 p-0",
+          title: t("settings"),
           onClick: () => setShowSettings(!showSettings),
         }, h(Codicon, { name: "settings-gear", size: 13 })),
         history.length > 0 && h(Button, {
           size: "sm",
           variant: "ghost",
-          title: LABELS.clearHistory,
-          onClick: () => historyAtom.set([]),
-        }, h(Codicon, { name: "clear-all", size: 13 }))
+          className: "size-7 p-0",
+          title: t("clearHistory"),
+          onClick: () => {
+            historyAtom.set([]);
+            host?.notify?.({ kind: "info", message: t("historyCleared") });
+          },
+        }, h(Codicon, { name: "clear-all", size: 13 })),
+        h(Button, {
+          size: "sm",
+          variant: "ghost",
+          className: "size-7 p-0",
+          title: t("closePanel"),
+          onClick: closeSidebar,
+        }, h(Codicon, { name: "close", size: 14 }))
       )
     ),
 
     // 2. Settings Collapsible Section
     showSettings && h("div", {
-      className: "p-2.5 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-2.5 text-xs",
+      className: "p-3 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-2.5 text-xs",
     },
+      // Target languages
       h("div", { className: "space-y-1" },
-        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, LABELS.targetLangs),
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("targetLangs")),
         h(Input, {
           className: "h-7 text-xs",
           value: targetDraft,
@@ -1111,24 +1375,64 @@ function TranslationPane({ ctx }) {
           onChange: (e) => setTargetDraft(e.target.value),
         })
       ),
+
+      // Engine Mode
       h("div", { className: "space-y-1" },
-        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, "Режим перевода"),
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("engineMode")),
         h(Select, {
           value: modeDraft,
           onValueChange: (v) => setModeDraft(v),
         },
           h(SelectTrigger, { className: "h-7 text-xs w-full" },
-            h(SelectValue, { placeholder: "Выберите режим" })
+            h(SelectValue, { placeholder: t("engineMode") })
           ),
           h(SelectContent, null,
-            h(SelectItem, { value: "auto" }, LABELS.modeAuto),
-            h(SelectItem, { value: "fast" }, LABELS.modeFast),
-            h(SelectItem, { value: "llm" }, LABELS.modeLlm)
+            h(SelectItem, { value: "auto" }, t("modeAuto")),
+            h(SelectItem, { value: "fast" }, t("modeFast")),
+            h(SelectItem, { value: "llm" }, t("modeLlm"))
           )
         )
       ),
+
+      // History Mode (Item 9)
       h("div", { className: "space-y-1" },
-        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, LABELS.theme),
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("historyMode")),
+        h(Select, {
+          value: historyModeDraft,
+          onValueChange: (v) => setHistoryModeDraft(v),
+        },
+          h(SelectTrigger, { className: "h-7 text-xs w-full" },
+            h(SelectValue, { placeholder: t("historyMode") })
+          ),
+          h(SelectContent, null,
+            h(SelectItem, { value: "all" }, t("historyAll")),
+            h(SelectItem, { value: "latest" }, t("historyLatest")),
+            h(SelectItem, { value: "off" }, t("historyOff"))
+          )
+        )
+      ),
+
+      // Debounce delay
+      h("div", { className: "space-y-1" },
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("debounceMs")),
+        h(Select, {
+          value: debounceDraft,
+          onValueChange: (v) => setDebounceDraft(v),
+        },
+          h(SelectTrigger, { className: "h-7 text-xs w-full" },
+            h(SelectValue, { placeholder: t("debounceMs") })
+          ),
+          h(SelectContent, null,
+            h(SelectItem, { value: "150" }, "150 ms (Быстрый)"),
+            h(SelectItem, { value: "280" }, "280 ms (Оптимальный)"),
+            h(SelectItem, { value: "450" }, "450 ms (С защитой от двойного клика)")
+          )
+        )
+      ),
+
+      // Color Theme
+      h("div", { className: "space-y-1" },
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("theme")),
         h(Select, {
           value: themeDraft,
           onValueChange: (v) => {
@@ -1137,28 +1441,45 @@ function TranslationPane({ ctx }) {
           },
         },
           h(SelectTrigger, { className: "h-7 text-xs w-full" },
-            h(SelectValue, { placeholder: "Выберите тему" })
+            h(SelectValue, { placeholder: t("theme") })
           ),
           h(SelectContent, null,
             THEME_PRESETS.map((p) => h(SelectItem, { key: p.id, value: p.id }, p.name))
           )
         )
       ),
-      h("div", { className: "flex justify-end gap-2 pt-1" },
+
+      // Auto-popup toggle
+      h("div", { className: "flex items-center justify-between pt-1" },
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("autoPopup")),
+        h(Switch, {
+          checked: autoPopupDraft,
+          onCheckedChange: (checked) => setAutoPopupDraft(checked),
+        })
+      ),
+
+      // Action Buttons
+      h("div", { className: "flex justify-end gap-2 pt-2 border-t border-[var(--ui-stroke-secondary)]" },
         h(Button, {
           size: "sm",
           variant: "default",
           onClick: () => {
-            patchSettings({ targets: targetDraft, engineMode: modeDraft });
+            patchSettings({
+              targets: targetDraft,
+              engineMode: modeDraft,
+              historyMode: historyModeDraft,
+              debounceMs: parseInt(debounceDraft, 10) || 280,
+              autoPopup: autoPopupDraft,
+            });
             setShowSettings(false);
-            host?.notify?.({ kind: "success", message: "Настройки перевода сохранены" });
+            host?.notify?.({ kind: "success", message: t("saved") });
           },
-        }, LABELS.save),
+        }, t("save")),
         h(Button, {
           size: "sm",
           variant: "ghost",
           onClick: () => setShowSettings(false),
-        }, LABELS.close)
+        }, t("close"))
       )
     ),
 
@@ -1167,7 +1488,7 @@ function TranslationPane({ ctx }) {
       h(Textarea, {
         className: "text-xs resize-none font-sans",
         style: { minHeight: "68px" },
-        placeholder: "Вставьте текст для перевода или нажмите Alt+T (буфер)...",
+        placeholder: t("manualInputPlaceholder"),
         value: inputText,
         onChange: (e) => setInputText(e.target.value),
         onKeyDown: (e) => {
@@ -1184,66 +1505,93 @@ function TranslationPane({ ctx }) {
           disabled: translating || !inputText.trim(),
           onClick: runManualTranslate,
         },
-          translating ? [h(Loader, { key: "loader", className: "size-3 mr-1" }), "Перевод…"] : "Перевести"
+          translating ? [h(Loader, { key: "loader", className: "size-3 mr-1" }), t("loading")] : t("translateBtn")
         )
       )
     ),
 
     h(Separator, null),
 
-    // 4. History Feed
-    h("div", { className: "flex-1 min-h-0 overflow-y-auto space-y-2.5 pr-1" },
-      history.length === 0
+    // 4. History Feed (with auto-scroll ref and high-contrast card styling)
+    h("div", {
+      ref: historyListRef,
+      className: "flex-1 min-h-0 overflow-y-auto space-y-3 pr-1",
+    },
+      settings.historyMode === "off"
         ? h(EmptyState, {
-            title: LABELS.emptyPanel,
-            description: LABELS.emptyDesc,
+            title: t("historyOff"),
+            description: "История отключена в настройках плагина.",
+          })
+        : history.length === 0
+        ? h(EmptyState, {
+            title: t("emptyPanel"),
+            description: t("emptyDesc"),
           })
         : history.map((item) =>
             h("div", {
               key: item.id,
-              className: "p-2.5 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-1.5 text-xs",
+              className: "hermes-tr-card p-3 space-y-2 text-xs",
             },
+              // Card Header
               h("div", {
-                className: "flex items-center justify-between text-[10px] text-[var(--ui-text-tertiary)]",
+                className: "flex items-center justify-between pb-1 border-b border-[var(--ui-stroke-secondary)] text-[10px]",
               },
-                h("span", {
-                  className: "font-mono font-semibold uppercase text-[var(--ui-accent)]",
-                }, item.detected ? `${item.detected} → ${item.results.map((r) => r.lang).join(", ")}` : "перевод"),
+                h("div", { className: "flex items-center gap-1.5 font-mono font-semibold uppercase text-[var(--ui-accent)]" },
+                  h("span", null, item.detected ? `${item.detected} → ${item.results.map((r) => r.lang).join(", ")}` : "Перевод"),
+                  item.results.length > 0 && (() => {
+                    const badge = formatEngineBadge(item.results[0].engineUsed);
+                    return h("span", {
+                      className: `hermes-tr-badge hermes-tr-badge-${badge.tone}`,
+                    }, badge.label);
+                  })()
+                ),
                 h("button", {
                   className: "hermes-tr-btn-ghost text-[10px]",
                   onClick: () => {
                     const fullText = item.results.map((r) => `[${r.lang.toUpperCase()}]\n${r.text}`).join("\n\n");
                     copyItemText(fullText, item.id);
                   },
-                }, copiedId === item.id ? "✓ Скопировано" : "Копировать всё")
+                }, copiedId === item.id ? "✓" : t("copyAll"))
               ),
-              h("div", {
-                className: "line-clamp-2 italic text-[var(--ui-text-secondary)] opacity-80 border-l-2 border-[var(--ui-stroke-secondary)] pl-2",
-              }, item.sourceText),
-              h("div", { className: "space-y-1.5 pt-1" },
-                item.results.map((r, rIdx) =>
-                  h("div", {
+
+              // Source (Original Text) with subtle secondary styling
+              h("div", { className: "space-y-0.5" },
+                h("span", {
+                  className: "text-[9px] uppercase tracking-wider font-semibold text-[var(--ui-text-tertiary)]",
+                }, t("original")),
+                h("div", {
+                  className: "line-clamp-3 text-[11.5px] leading-relaxed text-[var(--ui-text-secondary)] pl-2 border-l-2 border-[var(--ui-stroke-secondary)]",
+                }, item.sourceText)
+              ),
+
+              // Target Translations (Hero element)
+              h("div", { className: "space-y-2 pt-1" },
+                item.results.map((r, rIdx) => {
+                  const badge = formatEngineBadge(r.engineUsed);
+                  return h("div", {
                     key: rIdx,
-                    className: "p-1.5 rounded bg-[var(--background)] border border-[var(--ui-stroke-secondary)] cursor-pointer hover:border-[var(--ui-accent)] transition-colors",
+                    className: "p-2 rounded bg-[var(--background)] border border-[var(--ui-stroke-secondary)] cursor-pointer hover:border-[var(--ui-accent)] transition-all",
                     onClick: () => copyItemText(r.text, `${item.id}-${r.lang}`),
-                    title: "Клик — копировать",
+                    title: t("copy"),
                   },
                     h("div", {
-                      className: "flex justify-between items-center text-[10px] font-semibold text-[var(--ui-accent)] mb-0.5",
+                      className: "flex justify-between items-center text-[10px] font-semibold text-[var(--ui-accent)] mb-1",
                     },
-                      h("span", null, r.lang.toUpperCase()),
-                      h("div", { className: "flex items-center gap-1" },
-                        r.engineUsed === "llm" && h(Badge, { variant: "outline", className: "text-[8px] py-0 px-1" }, "LLM"),
-                        h("span", { className: "text-[9px] text-[var(--ui-text-tertiary)]" },
-                          copiedId === `${item.id}-${r.lang}` ? "✓" : "копия"
-                        )
+                      h("div", { className: "flex items-center gap-1.5" },
+                        h("span", { className: "tracking-wide" }, r.lang.toUpperCase()),
+                        h("span", {
+                          className: `hermes-tr-badge hermes-tr-badge-${badge.tone}`,
+                        }, badge.label)
+                      ),
+                      h("span", { className: "text-[9px] text-[var(--ui-text-tertiary)] font-normal" },
+                        copiedId === `${item.id}-${r.lang}` ? t("copied") : t("copy")
                       )
                     ),
                     h("div", {
-                      className: "whitespace-pre-wrap leading-relaxed text-[var(--ui-text-primary)]",
+                      className: "text-[13px] leading-relaxed text-[var(--ui-text-primary)] font-normal",
                     }, r.error ? h("span", { className: "text-[#f0a35e]" }, r.error) : r.text)
-                  )
-                )
+                  );
+                })
               )
             )
           )
@@ -1252,7 +1600,41 @@ function TranslationPane({ ctx }) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   8. HOTKEYS & COMMAND PALETTE HANDLERS
+   8. STATUS BAR INTERACTIVE CHIP (Item 10)
+   ══════════════════════════════════════════════════════════════════════════ */
+
+function TranslationStatusChip({ ctx }) {
+  const settings = useValue(settingsAtom);
+  const t = useTranslate();
+  const enabled = settings.autoPopup !== false;
+
+  return h("button", {
+    className: "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] transition-colors hover:bg-[var(--chrome-action-hover,rgba(255,255,255,0.08))]",
+    style: {
+      background: "transparent",
+      border: "none",
+      cursor: "pointer",
+      color: enabled ? "var(--ui-accent)" : "var(--ui-text-tertiary)",
+    },
+    title: `${t("autoPopup")}: ${enabled ? t("enabled") : t("disabled")}. ${t("statusChipTip")}`,
+    onClick: () => {
+      const next = !enabled;
+      patchSettings({ autoPopup: next });
+      host?.notify?.({
+        kind: "info",
+        message: `${t("autoPopup")}: ${next ? t("enabled") : t("disabled")}`,
+      });
+    },
+  },
+    h(Codicon, { name: enabled ? "globe" : "circle-slash", size: 12 }),
+    h("span", { style: { fontWeight: enabled ? 600 : 400 } },
+      enabled ? t("statusChipOn") : t("statusChipOff")
+    )
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   9. HOTKEYS & COMMAND PALETTE HANDLERS
    ══════════════════════════════════════════════════════════════════════════ */
 
 async function translateClipboard() {
@@ -1273,7 +1655,7 @@ async function translateClipboard() {
   const currentCfg = settingsAtom.get();
   const targets = currentCfg.targets
     .split(/[,;\s]+/)
-    .map((t) => t.trim().toLowerCase())
+    .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
 
   const focusedSid =
@@ -1333,7 +1715,7 @@ async function translateLastAssistantMessage() {
 
   const targets = currentCfg.targets
     .split(/[,;\s]+/)
-    .map((t) => t.trim().toLowerCase())
+    .map((item) => item.trim().toLowerCase())
     .filter(Boolean);
 
   const focusedSid =
@@ -1369,21 +1751,37 @@ async function translateLastAssistantMessage() {
 
 function setupGlobalHotkeys() {
   const onKeyDown = (e) => {
+    // Alt+T: Translate clipboard
     if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyT") {
       e.preventDefault();
       translateClipboard();
       return;
     }
 
+    // Alt+Shift+T: Translate last assistant message
     if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyT") {
       e.preventDefault();
       translateLastAssistantMessage();
       return;
     }
 
+    // Alt+P: Toggle persistent side panel
     if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyP") {
       e.preventDefault();
       panelOpenAtom.set(!panelOpenAtom.get());
+      return;
+    }
+
+    // Alt+Shift+O: Quick toggle auto-popup on selection (Item 10)
+    if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyO") {
+      e.preventDefault();
+      const current = settingsAtom.get();
+      const next = current.autoPopup === false;
+      patchSettings({ autoPopup: next });
+      host?.notify?.({
+        kind: "info",
+        message: `Перевод при выделении: ${next ? "Включен" : "Выключен"}`,
+      });
       return;
     }
   };
@@ -1393,7 +1791,7 @@ function setupGlobalHotkeys() {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   9. PLUGIN LIFECYCLE & REGISTRATION
+   10. PLUGIN LIFECYCLE & REGISTRATION
    ══════════════════════════════════════════════════════════════════════════ */
 
 export default {
@@ -1404,23 +1802,45 @@ export default {
     _storage = ctx.storage;
     _os = ctx.os || null;
 
+    // 1. Register reactive i18n locales
+    if (ctx.i18n && typeof ctx.i18n.register === "function") {
+      ctx.i18n.register(LOCALES);
+    }
+
+    // 2. Load persisted settings
     const initialSettings = loadSettings(ctx.storage);
     settingsAtom.set(initialSettings);
 
+    // 3. Register global SelectionPopupHost via statusbar right
     ctx.register({
       id: "selection-popup-host",
       area: STATUSBAR_AREAS.right,
       render: () => h(SelectionPopupHost, null),
     });
 
+    // 4. Register interactive status bar toggle chip (Item 10)
+    ctx.register({
+      id: "chip",
+      area: STATUSBAR_AREAS.right,
+      order: 100,
+      render: () => h(TranslationStatusChip, { ctx }),
+    });
+
+    // 5. Register persistent Layout Pane (right rail sidebar)
     ctx.register({
       id: "pane",
       area: PANES_AREA,
       title: "Перевод",
-      data: { placement: "right", width: "340px" },
+      data: {
+        placement: "right",
+        width: "340px",
+        collapsible: true,
+        tabTitleText: () => (ctx.i18n?.t ? ctx.i18n.t("panelTitle") : "Перевод"),
+      },
       render: () => h(TranslationPane, { ctx }),
     });
 
+    // 6. Register Palette Commands
     ctx.register({
       id: "palette.translate-clipboard",
       area: PALETTE_AREA,
@@ -1454,8 +1874,29 @@ export default {
       },
     });
 
+    ctx.register({
+      id: "palette.toggle-auto",
+      area: PALETTE_AREA,
+      data: {
+        id: "translate.toggle-auto",
+        label: "Translate: Включить / выключить автоперевод (Alt+Shift+O)",
+        keywords: ["translate", "toggle", "switch", "автоперевод", "вкл", "выкл"],
+        run: () => {
+          const current = settingsAtom.get();
+          const next = current.autoPopup === false;
+          patchSettings({ autoPopup: next });
+          host?.notify?.({
+            kind: "info",
+            message: `Перевод при выделении: ${next ? "Включен" : "Выключен"}`,
+          });
+        },
+      },
+    });
+
+    // 7. Setup global hotkeys listener
     const removeHotkeys = setupGlobalHotkeys();
 
+    // 8. Cleanup on dispose
     ctx.onDispose(() => {
       removeHotkeys();
       const styleEl = document.getElementById("hermes-translate-selection-styles");
