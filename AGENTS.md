@@ -1,39 +1,44 @@
 # AGENTS.md — Tree-Docs Navigation Root
 
-**Проект:** `hermes-translate-selection-plugin` — Hermes Desktop plugin для мгновенного inline-перевода при выделении текста. Hybrid LLM/MT routing, React-рендеринг, чистый ESM.
+[Русский](AGENTS_RU.md)
 
-## Карта документов (tree-docs)
+**Project:** `hermes-translate-selection-plugin` — Hermes Desktop & WebApp plugin for instant inline translation tooltip on text selection. Smart Hybrid LLM/MT routing, React JSX runtime rendering, self-contained plain ESM.
+
+## Documentation Map (tree-docs)
 
 ```
-📁 docs/          ← все артефакты проекта
-├── plans/        ← текущие планы и спецификации
-│   └── microspec-v1.md  ← MVP план (scope, phases, architecture)
-└── references/   ← технические референсы из анализа upstream
-    ├── hermes-sdk-patterns.md  ← уроки из hermes-insight (popup, host.request, ctx.storage)
-    └── opencode-vs-hermes.md   ← маппинг API OpenCode → Hermes
+📁 docs/          ← Project specifications and reference materials
+├── plans/        ← Active plans and phase tracking
+│   ├── microspec-v1.md     ← MVP scope, phases & delivery status (EN)
+│   └── microspec-v1_RU.md  ← MVP scope, phases & delivery status (RU)
+└── reference/    ← Upstream architecture and contract mappings
+    ├── hermes-sdk-patterns.md     ← Lessons from Hermes SDK & companion plugins (EN)
+    ├── hermes-sdk-patterns_RU.md  ← Lessons from Hermes SDK & companion plugins (RU)
+    ├── opencode-vs-hermes.md      ← API & architectural mapping from OpenCode (EN)
+    └── opencode-vs-hermes_RU.md   ← API & architectural mapping from OpenCode (RU)
 
-📁 src/           ← исходный код плагина
-├── plugin.js     ← точка входа (register, panels, palette)
-├── selection.js  ← detection popup (mouse up / selection change)
-├── translate.js  ← hybrid LLM/MT engine (port from opencode)
-├── storage.js    ← settings via ctx.storage
-└── panel.js      ← persistent side-panel for translations
+📁 src/           ← Source code
+└── plugin.js     ← Fully self-contained ESM plugin entrypoint
 
-📄 README.md
-📄 LICENSE
+📁 test/          ← Test suite
+└── unit.test.mjs ← Unit tests for core functions (node:test)
+
+📄 README.md      ← Main user documentation (EN)
+📄 README_RU.md   ← User documentation (RU)
+📄 LICENSE        ← MIT License
 ```
 
-## Принцип работы агентов
+## Agent Operating Guidelines
 
-1. **Начни с `microspec-v1.md`** — scope, фазы, архитектура. Это карта целей.
-2. **Читай `references/*.md`** перед реализацией — готовые паттерны из анализа upstream плагинов.
-3. **Проверяй код по `src/*.js`** — каждый файл самодостаточен, не галлюцинируй импорт SDK.
-4. **Не меняй поведение ради структуры.** Документация объясняет решения, а не управляет кодом напрямую.
-5. **Ссылки на файлы давай как `путь:line`**, не копируй целиком в ответ.
+1. **Start with `docs/plans/microspec-v1.md`** — review scope, phase statuses, and architectural invariants before proposing changes.
+2. **Review `docs/reference/*.md`** before touching runtime integrations — leverage verified SDK patterns and RPC contracts (`llm.oneshot`, `host.request`).
+3. **Keep `src/plugin.js` self-contained** — the Hermes Desktop plugin loader evaluates code from a `blob:` URL; relative imports (`./foo.js`) are rejected.
+4. **Do not mutate code for cosmetic reasons.** Changes must solve real functional, reliability, or UX requirements.
+5. **Reference files as `path:line`**, avoid dumping whole files into chat.
 
-## Ключевые ограничения
+## Key Constraints & Invariants
 
-- Только `@hermes/plugin-sdk`, `react`, `react/jsx-runtime`. Никаких сторонних npm-пакетов.
-- `plugin.js` загружается без компиляции (plain ESM). JSX через `jsx()`/`jsxs()`.
-- Каталог имён папок `~/.hermes/desktop-plugins/<id>/` должен совпадать с `id` в export.
-- Selection popup — fixed-position div, нет `<Portal>` (это Electron-специфика).
+- **Import boundaries:** Allowed imports are strictly `@hermes/plugin-sdk`, `react`, and `react/jsx-runtime`. External npm packages cannot be imported.
+- **Plain ESM:** The file is evaluated without compilation; construct UI elements using `jsx()` / `jsxs()` from `react/jsx-runtime`.
+- **Plugin ID matching:** Folder name `~/.hermes/desktop-plugins/<id>/` must strictly match the exported `id: 'translate-selection'`.
+- **Popup overlay:** Rendered as fixed-position element (`position: fixed`) with boundary checks against viewport edges and selection clearance.

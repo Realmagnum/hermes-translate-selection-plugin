@@ -1,18 +1,21 @@
 # Microspec v1 — hermes-translate-selection-plugin
 
+[Русский](microspec-v1_RU.md)
+
 ## Scope & Target Platforms
 
-**Что:** Instant inline translation tooltip on text selection for Hermes Desktop (Electron) and Hermes WebApp.
-**Поддерживаемые режимы:**
-1. Mouse selection popup (выделил текст -> всплывает тултип с мгновенным переводом)
-2. Persistent side panel (боковая панель в правой рейке `PANES_AREA` с историей переводов и ручным вводом)
-3. Conflict-free hotkeys (`Alt+T` для буфера обмена, `Alt+Shift+T` для ответа ассистента, `Alt+P` для переключения панели)
-4. Command Palette (`/translate`, `/translate-last`, `/translate-panel`)
-5. Smart Hybrid Routing (Google MT Tier 1 -> Google MT Tier 2 -> MyMemory Tier 3 -> Session LLM `llm.oneshot`)
+**Objective:** Instant inline translation tooltip on text selection for Hermes Desktop (Electron) and Hermes WebApp.
+
+**Supported Modalities:**
+1. **Mouse selection popup:** Select text anywhere in chat or UI -> non-intrusive tooltip appears with immediate translation.
+2. **Persistent side panel (`PANES_AREA`):** Right-rail panel (340px) tracking translation history with manual input.
+3. **Conflict-free hotkeys:** `Alt+T` for clipboard text, `Alt+Shift+T` for last assistant response, `Alt+P` for panel toggle.
+4. **Command Palette:** `/translate`, `/translate-last`, `/translate-panel`.
+5. **Smart Hybrid Routing:** Multi-tier MT (Google `gtx` -> `dict-chrome-ex` -> `MyMemory`) + native gateway `llm.oneshot` with token shielding.
 
 ---
 
-## Архитектура реализации
+## Architectural Blueprint
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -47,23 +50,23 @@
 
 ---
 
-## Статус фаз разработки
+## Implementation Phase Status
 
-| Фаза | Статус | Достигнутый результат |
-|------|--------|-----------------------|
-| **P0: Скелет & контракт** | ✅ Готово | Инициализация репо, дерево tree-docs, архитектурный маппинг OpenCode -> Hermes SDK. |
-| **P1: Selection Popup** | ✅ Готово | `SelectionPopupHost` в `STATUSBAR_AREAS.right`, глобальные слушатели mouseup/mousedown/keydown/scroll/resize, расчет координат с учетом clearance, дебаунс, защита от инпутов (`textarea, input, contenteditable`). |
-| **P2: Hybrid Routing & LLM** | ✅ Готово | Определение сложности текста `isComplexFormattedText`, токен-шилдинг `shieldTokens`, нативный шлюзовый вызов `host.request("llm.oneshot")` с сессионным контекстом и таймаутом, каскадный откат на MT (Google gtx -> dict-chrome-ex -> MyMemory). |
-| **P3: Side Panel** | ✅ Готово | Боковая панель в `PANES_AREA` (размещение `right`, ширина 340px), автонакопление истории, статус-индикаторы (LLM/MT), быстрое копирование. |
-| **P4: Hotkeys & Palette** | ✅ Готово | Горячие клавиши `Alt+T` (перевод буфера), `Alt+Shift+T` (перевод ответа ассистента), `Alt+P` (панель). Команды в `PALETTE_AREA`. |
-| **P5: Settings UI** | ✅ Готово | Редактирование целевых языков, выбор режима (Auto/Fast MT/LLM), переключение 5 цветовых тем (Amber Gold, Midnight OLED, Cyberpunk, Nordic Slate, Paper Light), сохранение в `ctx.storage`. |
-| **P6: Тестирование & Релиз** | ✅ Готово | Модульные тесты `test/unit.test.mjs` (6/6 pass), проверка синтаксиса `node -c`, документация README и AGENTS.md. |
+| Phase | Status | Deliverable & Proof |
+|---|---|---|
+| **P0: Skeleton & Contract** | ✅ Complete | Repo initialized, tree-docs structure established, OpenCode -> Hermes SDK architectural mapping drafted. |
+| **P1: Selection Popup** | ✅ Complete | `SelectionPopupHost` mounted via `STATUSBAR_AREAS.right`, global mouseup/mousedown/keydown/scroll/resize listeners, clearance calculation, input suppression (`textarea`, `input`, `contenteditable`). |
+| **P2: Hybrid Routing & LLM** | ✅ Complete | Complexity detector `isComplexFormattedText`, token shielding `shieldTokens`, native gateway RPC `host.request("llm.oneshot")` with session context and timeout, cascaded MT fallback. |
+| **P3: Side Panel** | ✅ Complete | Persistent layout pane in `PANES_AREA` (placement `right`, width 340px), auto-accumulating history, engine badges (`LLM`/`MT`), fast copy. |
+| **P4: Hotkeys & Palette** | ✅ Complete | Hotkeys `Alt+T` (clipboard), `Alt+Shift+T` (last turn), `Alt+P` (panel toggle). Commands registered in `PALETTE_AREA`. |
+| **P5: Settings UI** | ✅ Complete | Editable target languages, engine mode picker (Auto/Fast MT/LLM), 5 theme presets (Amber Gold, Midnight OLED, Cyberpunk, Nordic Slate, Paper Light), saved to `ctx.storage`. |
+| **P6: Testing & Release** | ✅ Complete | Unit tests `test/unit.test.mjs` (6/6 passing), syntax check `node -c`, comprehensive bilingual documentation. |
 
 ---
 
-## Проверенные инварианты
+## Verified Invariants
 
-1. **Self-contained ESM:** Файл `src/plugin.js` не содержит относительных импортов, проходящих через runtime-loader в виде blob-URL. Допустимы только `@hermes/plugin-sdk`, `react`, `react/jsx-runtime`.
-2. **Безопасность буфера и стилей:** Стили инжектируются один раз с проверкой ID элемента; при `ctx.onDispose()` все глобальные обработчики событий и инжектированные теги `<style>` удаляются.
-3. **Защита фокуса пользователя:** Плагин не перехватывает клики внутри редактируемых полей и не уводит фокус.
-4. **Неблокирующий UI:** Все сетевые запросы снабжены `AbortController` и таймаутами; гонки запросов нейтрализуются монотонным счетчиком `sequenceRef`.
+1. **Self-contained ESM:** `src/plugin.js` contains zero relative imports evaluated from blob URLs. Imports strictly limited to `@hermes/plugin-sdk`, `react`, and `react/jsx-runtime`.
+2. **Style & Listener Isolation:** Styles injected once with element ID deduplication; `ctx.onDispose()` unbinds all window listeners and removes injected `<style>` tags.
+3. **User Focus Protection:** Clicks inside editable fields are ignored; focus is never hijacked.
+4. **Non-blocking UI:** All network requests wrapped with `AbortController` and deadlines; request races neutralized by monotonic sequence counter `sequenceRef`.

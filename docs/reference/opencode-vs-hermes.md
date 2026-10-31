@@ -1,47 +1,48 @@
-# OpenCode → Hermes API Mapping
+# OpenCode → Hermes Desktop API & Architectural Mapping
 
-## Прямой маппинг вызовов
+[Русский](opencode-vs-hermes_RU.md)
 
-| Opencode Translate | Hermes Equivalent | Source (opencode) |
-|-------------------|-------------------|-------------------|
-| `Plugin.define()` | `{ id, name, register(ctx) }` export | `index.ts:8-10` |
-| `@opencode/plugin/gui.Ipc.define` | **удалить** (нет IPC в Hermes Desktop) | `contract.ts` - весь файл удалён |
-| `Ipc.call("translate-selection.translate", ...)` | `host.request("cli.exec", { argv: ["translate", ...] })` или прямой fetch для MT | — |
-| `client.session.generate({ sessionID, prompt })` | `host.request("session.generate", { sessionID, prompt })` или через cli.exec | `llm-engine.ts:81` |
-| `Store.global.get/set` | `ctx.storage.set/get` (атомы) | `settings.ts` → `storage.js` |
-| `SolidJS <Portal>` | Fixed-position div без Portal | `popup.tsx:328-415` — перестроить на React + JSX |
-| `clipboard.writeText()` | `navigator.clipboard.writeText()` или `host.os.copyText()` | `src/clipboard.ts` (не читал, но стандартный API) |
+## Direct Call & Hook Mapping
 
-## Архитектурные отличия
+| OpenCode Translate Component | Hermes Desktop Equivalent | Source in OpenCode |
+|---|---|---|
+| `Plugin.define({ id, setup })` | `export default { id, name, defaultEnabled, register(ctx) }` | `src/index.ts:8-10` |
+| `@opencode/plugin/gui.Ipc.define` | **Removed** (Hermes Desktop operates in a unified renderer context) | `src/contract.ts` (Effect Schema) |
+| `Ipc.call("translate-selection.translate", ...)` | Native in-process `executeTranslate()` + direct `fetch()` for MT | `src/popup.tsx:194` |
+| `client.session.generate({ sessionID, prompt })` | `host.request("llm.oneshot", { instructions, input, session_id })` | `src/llm-engine.ts:81` |
+| `Store.global.get/set` | `ctx.storage.get/set` via `atom()` | `src/settings.ts` |
+| SolidJS `<Portal>` | Standard fixed-position `<div>` with viewport boundary clamping | `src/popup.tsx:328-415` |
+| `clipboard.writeText()` | `navigator.clipboard.writeText()` + `ctx.os.writeClipboard()` | `src/clipboard.ts` |
+| Custom terminal TUI (`@opentui/solid`) | Side layout panel (`PANES_AREA`) + Command Palette (`PALETTE_AREA`) | `src/tui.tsx` |
 
-### Opencode Translate
-- **Двухпроцессная архитектура:** GUI process (renderer) ↔ Main process (server half, index.ts:3-5)
-- **IPC channel:** Ipc.define с Effect Schema валидацией (contract.ts)
-- **Session access:** `client.session.generate()` из opencode SDK
-- **SolidJS:** Компоненты с createSignal, For, Show (solid-js)
+---
 
-### Hermes Desktop (Target)
-- **Один процесс:** Webview/renderer, всё в одном файле (plugin.js)
-- **Нет IPC:** Прямой `fetch()` для MT endpoints, `host.request()` для LLM
-- **Session access:** Через `host.request("session.options")` или `host.request("session.list")`
-- **React + JSX:** Нет компиляции (plain ESM), jsx() из 'react/jsx-runtime'
+## Architectural Differences
 
-## Что можно port 1:1 (чистый JS)
+### OpenCode Desktop Plugin Architecture
+- **Multi-Process Model:** GUI renderer process ↔ Main Electron process connected via an IPC bridge (`Ipc.define`).
+- **Heavy Schema Validation:** Used `@effect/schema` for runtime contract enforcement between processes.
+- **UI Framework:** SolidJS reactive primitives (`createSignal`, `<For>`, `<Show>`, `<Portal>`).
+- **LLM Access:** Routed through OpenCode client SDK (`client.session.generate()`).
 
-- `detector.ts` → `src/detector.js` — чистые хеуристики, никаких импортов кроме exports
-- `shield.ts` → `src/shield.js` — regex-замена, без зависимостей
-- Основная логика `translate.ts` → `src/translate.js` — почти чистый JS, только заменить `Ipc.call` на прямые вызовы
+### Hermes Desktop Plugin Architecture
+- **Unified Renderer Model:** The desktop plugin is loaded directly into the Electron client window as a plain ECMAScript Module (ESM).
+- **Direct Network Access:** Standard `fetch()` calls execute directly in the renderer without requiring backend proxy shims for public MT APIs.
+- **Native Gateway RPC:** The agent gateway provides `host.request("llm.oneshot", ...)` for stateless out-of-band completions on the active model.
+- **UI Framework:** Standard React with `jsx()`/`jsxs()` runtime calls (no JSX transpilation step required).
+- **Namespaced Storage:** Built-in isolated persistence via `ctx.storage.get()` / `ctx.storage.set()`.
 
-## Что переписывать
+---
 
-- `popup.tsx` (SolidJS) → `src/selection.js` (React): Переписать createSignal→useState, For→{list.map()}, Show→条件渲染, Solid events→React events
-- `settings-view.tsx` → `src/settings.js`: React forms вместо Solid JSX
-- `gui.tsx` → **удалить**: это Electron-specific popup renderer (для OpenCode Desktop); в Hermes используем встроенный pane mechanism
-- `index.ts` → `src/plugin.js`: Реестр плагина + точки входа
+## Porting Breakdown: 1-to-1 Logic vs Rewritten
 
-## Что не переносим
+### Ported 1-to-1 (Pure JavaScript Logic)
+- **`detector.ts` → `isComplexFormattedText()`:** Pure regex heuristics analyzing code fences, markdown lists, headings, and API identifiers.
+- **`shield.ts` → `shieldTokens()` & `unshieldTokens()`:** Mathematical marker shielding (`\u27A6N\u27A7`) preventing MT engines from corrupting code syntax.
+- **`translate.ts` MT pipeline:** Cascaded fallback (Google MT `gtx` → Google `dict-chrome-ex` → `MyMemory API`) with memory caching and language heuristics.
 
-- `tui.tsx` и `tui.ts`: Terminal UI на @opentui/solid — пока откладываем (фазы P6+)
-- `build-tui.mjs`: Скрипт сборки TUI модуля — не нужен
-- `vite.config.ts`, `tsconfig.json`: Конфиги опкоде, Hermes использует plain ESM без сборщика
-
+### Rewritten for Hermes SDK
+- **`popup.tsx` (SolidJS) → `SelectionPopupHost` (React):** Converted signals to React hooks (`useState`, `useRef`, `useCallback`) and DOM listeners to `useEffect` with cleanup on unmount.
+- **`llm-engine.ts`:** Replaced `@opencode/plugin` session calls with native Hermes gateway `host.request("llm.oneshot")`.
+- **`settings.ts` & `settings-view.tsx`:** Consolidated into reactive atoms (`nanostores`) backed by `ctx.storage` with collapsible controls inside the persistent side panel.
+- **`index.ts` & `gui.tsx`:** Replaced by `src/plugin.js` registering layout panes in `PANES_AREA`, global statusbar listeners in `STATUSBAR_AREAS.right`, and keyboard commands in `PALETTE_AREA`.

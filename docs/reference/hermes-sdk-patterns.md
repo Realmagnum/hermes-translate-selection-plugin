@@ -1,149 +1,167 @@
-# Hermes SDK Patterns — уроки из hermes-insight
+# Hermes SDK Patterns — Lessons from Hermes Companion Plugins
 
-## 1. Selection Popup Pattern (из `SelectionPopupHost` в insight:829-942)
+[Русский](hermes-sdk-patterns_RU.md)
+
+## 1. Selection Popup Pattern (from `SelectionPopupHost` in insight:829-942)
 
 ```javascript
-// Ключевые паттерны для popup при выделении текста:
+// Key patterns for mouse gesture selection popups:
 
-// A. Mouseup listener с debounce
+// A. Mouseup listener with debounce
 const onMouseUp = () => {
-  const sel = window.getSelection()
-  if (!sel || sel.isCollapsed) return
-  const text = sel.toString().trim()
-  if (!text.length) return
-  
-  // Позиция: относительно выделения
-  const r = sel.getRangeAt(0).getBoundingClientRect()
-  
-  // Показываем popup с координатами
-  setPopup({ x: r.left + r.width / 2, y: r.top, text })
-}
-document.addEventListener("mouseup", onMouseUp)
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) return;
+  const text = sel.toString().trim();
+  if (!text.length) return;
 
-// B. Selection change listener (для отладки, если нужно)
+  // Position relative to selection range
+  const r = sel.getRangeAt(0).getBoundingClientRect();
+
+  // Show popup with coordinates
+  setPopup({ x: r.left + r.width / 2, y: r.top, text });
+};
+document.addEventListener("mouseup", onMouseUp);
+
+// B. Selection change listener
 document.addEventListener("selectionchange", () => {
-  if (window.getSelection().isCollapsed) setPopup(null)
-})
+  if (window.getSelection().isCollapsed) setPopup(null);
+});
 
-// C. Закрытие при клике вне popup
+// C. Close on mousedown outside
 const onMouseDown = (e) => {
-  if (!e.target.closest("[data-insight]")) {
-    setPopup(null)
+  if (!e.target.closest("[data-translate]")) {
+    setPopup(null);
   }
-}
-document.addEventListener("mousedown", onMouseDown)
+};
+document.addEventListener("mousedown", onMouseDown);
 
-// D. Escape закрывает
+// D. Escape key dismiss
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") setPopup(null)
-})
+  if (e.key === "Escape") setPopup(null);
+});
 ```
 
-**Важно:** В opencode-translate-selection popup рисуется как **fixed-position div** с абсолютными координатами (popup.tsx:40-63), а не через `<Portal>`. Это потому что opencode плагин загружается в renderer-процесс Electron и имеет доступ к DOM напрямую. В Hermes Desktop аналогично — плагин рендерится в webview/renderer, fixed div работает.
+**Key Takeaway:** In `opencode-translate-selection`, the popup is rendered as a **fixed-position div** with calculated viewport coordinates, rather than via `<Portal>`. In Hermes Desktop Electron, the renderer has direct DOM access, so a fixed-position overlay div inside `SelectionPopupHost` works reliably without extra portal abstractions.
 
-## 2. Storage Pattern (из insight:70-101)
+---
+
+## 2. Storage Pattern (from insight:70-101)
 
 ```javascript
-// atom-based state management (hermes SDK pattern)
-const settingsAtom = atom(DEFAULT_SETTINGS)
+// atom-based state management with ctx.storage persistence
+const settingsAtom = atom(DEFAULT_SETTINGS);
 
 function loadSettings(storage) {
   try {
-    const raw = storage.get("settings.v1")
-    if (!raw) return DEFAULT_SETTINGS
-    return JSON.parse(raw)
+    const raw = storage.get("translate-selection.v1");
+    if (!raw) return DEFAULT_SETTINGS;
+    return JSON.parse(raw);
   } catch {
-    return DEFAULT_SETTINGS
+    return DEFAULT_SETTINGS;
   }
 }
 
 function patchSettings(patch) {
-  const next = { ...settingsAtom.get(), ...patch }
-  settingsAtom.set(next)
+  const next = { ...settingsAtom.get(), ...patch };
+  settingsAtom.set(next);
   if (_storage) {
-    try { _storage.set("settings.v1", JSON.stringify(next)) } catch {}
+    try {
+      _storage.set("translate-selection.v1", JSON.stringify(next));
+    } catch {}
   }
-  return next
+  return next;
 }
 ```
 
-**Паттерн:** Единый ключ `"settings.v1"` в `ctx.storage`, полный JSON. Атомарные обновления через `{...state, ...patch}`.
+**Pattern:** Store settings under a single namespaced key in `ctx.storage` as a serialized JSON string. Manage reactive state using `nanostores`/`atom` from `@hermes/plugin-sdk`.
 
-## 3. Gateway Communication (из insight:770-809, 1026-1065)
+---
+
+## 3. Gateway Communication & Stateless LLM Execution
 
 ```javascript
-// Два пути связи с бэкендом:
+// Built-in JSON-RPC gateway methods:
 
-// A. Через host.request() - вызовы API шлюза Hermes
-const r = await host.request("model.options", { explicit_only: false })
-// Или:
-const execP = host.request("cli.exec", { argv: ["insight", "--term", term], timeout: 240 })
+// A. Provider and Model options
+const r = await host.request("model.options", { explicit_only: false });
 
-// B. Для LLM translation: session.generate через cli.exec
-// В opencode это client.session.generate({ sessionID, prompt })
-// В Hermes — используем host.request("session.generate", ...) или 
-//   host.request("cli.exec", { argv: ["generate", "..."] })
+// B. Stateless one-shot LLM completion on active session model
+const res = await host.request("llm.oneshot", {
+  instructions: "You are a professional translator...",
+  input: textToTranslate,
+  session_id: host.state.focusedSessionId?.get() || null,
+  temperature: 0.1,
+  max_tokens: 2048,
+});
 
-// C. AbortController для таймаутов
-const ctrl = new AbortController()
-const aborted = new Promise((_, reject) => {
-  const onAbort = () => { ctrl.signal.removeEventListener("abort", onAbort); reject(new Error("Aborted")) }
-  if (ctrl.signal.aborted) onAbort()
-  else ctrl.signal.addEventListener("abort", onAbort)
-})
-await Promise.race([execP, aborted])
+// C. AbortController for bounded timeouts
+const ctrl = new AbortController();
+const timeout = setTimeout(() => ctrl.abort(), 3500);
 ```
 
-## 4. Pane Registration (из hermes-desktop-plugins skill)
+---
+
+## 4. Layout Pane Registration (from hermes-desktop-plugins skill)
 
 ```javascript
-import { PANES_AREA, PALETTE_AREA, STATUSBAR_AREAS, host, jsx } from "@hermes/plugin-sdk"
+import { PANES_AREA, PALETTE_AREA, STATUSBAR_AREAS, host } from "@hermes/plugin-sdk";
+import { jsx } from "react/jsx-runtime";
 
 export default {
   id: "translate-selection",
   name: "Translate Selection",
   defaultEnabled: true,
   register(ctx) {
+    // 1. Right rail layout pane (sidebar beside chat)
     ctx.register({
       id: "pane",
       area: PANES_AREA,
       title: "Translation",
-      data: { placement: "right", width: "320px" },
-      render: () => jsx(TranslationPane, { ctx })
-    })
-    
+      data: { placement: "right", width: "340px" },
+      render: () => jsx(TranslationPane, { ctx }),
+    });
+
+    // 2. Command Palette actions (Ctrl+K / Cmd+K)
     ctx.register({
       id: "palette.translate",
       area: PALETTE_AREA,
-      data: { id: "translate.open", label: "Translate selection", run: () => {/* ... */} }
-    })
-  }
-}
+      data: {
+        id: "translate.clipboard",
+        label: "Translate: Clipboard (Alt+T)",
+        run: () => translateClipboard(),
+      },
+    });
+  },
+};
 ```
 
-## 5. CSS Injection Pattern (из insight:811-827, 946-967)
+---
+
+## 5. CSS Injection Pattern (from insight:811-827)
 
 ```javascript
 function ensureStyles() {
-  if (document.getElementById("translate-styles")) return
-  const s = document.createElement("style")
-  s.id = "translate-styles"
+  const id = "translate-popup-styles";
+  if (document.getElementById(id)) return;
+  const s = document.createElement("style");
+  s.id = id;
   s.textContent = `
-    @keyframes translate-in{from{opacity:0;transform:translateY(4px)}to{opacity:1}}
-    .translate-popup{animation:translate-in .1s ease-out}
-    /* ... ваши стили ... */
-  `
-  document.head.appendChild(s)
+    @keyframes translate-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    .hermes-translate-popup { animation: translate-in .12s ease-out; }
+  `;
+  document.head.appendChild(s);
 }
 ```
 
-## 6. Pitfalls (из hermes-desktop-plugins skill)
+---
 
-| Проблема | Решение |
-|----------|---------|
-| Text selection blocked (`user-select: none`) | Добавьте `-webkit-user-select: text !important` на контейнер popup |
-| Window title drag zones | Не рендерите интерактивный контент в заголовках панелей shell |
-| No JSX compilation | Используйте `jsx()`/`jsxs()` из `'react/jsx-runtime'`, никаких тегов вроде `<div>` |
-| Directory name mismatch | Каталог `~/.hermes/desktop-plugins/<id>/` должен совпадать с `id` в export |
-| DOM leak | Все добавленные `<style>`, listeners, timers — чистить через `ctx.onDispose()` |
+## 6. Critical Invariants & Pitfalls
 
+| Pitfall | Solution |
+|---|---|
+| Text selection blocked (`user-select: none`) | Always set `-webkit-user-select: text !important; user-select: text !important;` on popup root and text children. |
+| Relative module imports | The Hermes Desktop loader evaluates plain ESM from a `blob:` URL. Relative imports (`./foo.js`) fail. Keep `plugin.js` completely self-contained. |
+| Window title drag zones | Header elements with `-webkit-app-region: drag` intercept clicks. Render interactive buttons only within the plugin pane body. |
+| Plain ESM syntax | No Babel/TS build step in Electron plugin watcher. Construct React nodes with `jsx()` from `react/jsx-runtime`. |
+| Directory name mismatch | Directory `~/.hermes/desktop-plugins/<id>/` must strictly match the plugin's exported `id`. |
+| Memory/DOM leaks | Unbind all event listeners and remove injected `<style>` elements via `ctx.onDispose()`. |
