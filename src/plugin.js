@@ -60,7 +60,7 @@ const DEFAULT_SETTINGS = {
   debounceMs: 280,           // Debounce delay to prevent premature triggers
   historyMode: "all",        // 'all' | 'latest' | 'off'
   historyLimit: 50,          // Max items in history
-  llmTimeoutMs: 3500,        // Max wait for LLM before MT fallback
+  llmTimeoutMs: 30000,       // 30s timeout for LLM reasoning models
   maxChars: 1500,            // Character truncation threshold
   maxHeight: 420,            // Popup height cap
   maxWidth: 560,             // Popup width cap
@@ -142,13 +142,15 @@ const LOCALES = {
     save: "Save",
     saved: "Settings saved",
     close: "Close",
-    targetLangs: "Target languages (comma-separated)",
+    targetLangs: "Target languages",
+    langCodesLink: "ISO 639-1 language codes ↗",
     engineMode: "Engine mode",
     modeAuto: "Auto (Smart Hybrid)",
     modeFast: "Fast MT Only (no LLM)",
     modeLlm: "Session LLM Only",
     theme: "Color theme",
     debounceMs: "Selection debounce delay",
+    llmTimeout: "LLM timeout",
     historyMode: "History mode",
     historyAll: "Full history (up to 50)",
     historyLatest: "Keep latest only",
@@ -161,14 +163,11 @@ const LOCALES = {
     enabled: "Enabled",
     disabled: "Disabled",
     statusChipOn: "Translate: On",
-    statusChipOff: "Translate: Paused",
-    statusChipTip: "Click: toggle auto-popup on selection (Alt+Shift+O)",
+    statusChipOff: "Translate: Off",
+    statusChipTip: "Toggle translation and sidebar (Alt+Shift+O)",
     original: "Original",
     manualInputPlaceholder: "Paste text to translate (Ctrl+Enter to send)...",
     translateBtn: "Translate",
-    fontSize: "Font size",
-    maxChars: "Character limit",
-    llmTimeout: "LLM timeout (ms)",
     sourceProvider: "Source",
     historyCleared: "History cleared",
   },
@@ -190,13 +189,15 @@ const LOCALES = {
     save: "Сохранить",
     saved: "Настройки сохранены",
     close: "Закрыть",
-    targetLangs: "Целевые языки (через запятую)",
+    targetLangs: "Целевые языки",
+    langCodesLink: "Коды языков (ISO 639-1) ↗",
     engineMode: "Режим перевода",
     modeAuto: "Auto (Smart Hybrid)",
     modeFast: "Fast MT Only (без LLM)",
     modeLlm: "Session LLM Only",
     theme: "Цветовая тема",
     debounceMs: "Задержка выделения",
+    llmTimeout: "Таймаут LLM",
     historyMode: "Режим истории",
     historyAll: "Вся история (до 50)",
     historyLatest: "Только последний",
@@ -209,14 +210,11 @@ const LOCALES = {
     enabled: "Включен",
     disabled: "Выключен",
     statusChipOn: "Перевод: Вкл",
-    statusChipOff: "Перевод: Пауза",
-    statusChipTip: "Клик: включить / выключить автоперевод (Alt+Shift+O)",
+    statusChipOff: "Перевод: Выкл",
+    statusChipTip: "Переключить перевод и боковую панель (Alt+Shift+O)",
     original: "Оригинал",
     manualInputPlaceholder: "Вставьте текст для перевода (Ctrl+Enter для отправки)...",
     translateBtn: "Перевести",
-    fontSize: "Размер шрифта",
-    maxChars: "Лимит символов",
-    llmTimeout: "Таймаут LLM (мс)",
     sourceProvider: "Источник",
     historyCleared: "История очищена",
   },
@@ -294,17 +292,16 @@ function addHistoryEntry(entry) {
   const normalizedText = (entry.sourceText || "").trim();
   if (!normalizedText) return;
 
-  // 1. Prevent duplicate translations on repeated right-clicks or re-clicks
+  // 1. Prevent duplicate translations on repeated clicks
   if (list.length > 0 && (list[0].sourceText || "").trim() === normalizedText) {
     return;
   }
 
-  // 2. Coalescing: if previous entry was created within 1.8s AND was a single word prefix of current text
-  // (e.g. user double-clicked first word, then dragged to select the full sentence)
+  // 2. Coalescing: merge single-word clicks into extended phrase selections
   let updatedList = list;
   if (
     list.length > 0 &&
-    Date.now() - new Date(list[0].time).getTime() < 1800 &&
+    Date.now() - new Date(list[0].time).getTime() < 2200 &&
     normalizedText.startsWith((list[0].sourceText || "").trim())
   ) {
     updatedList = list.slice(1);
@@ -450,15 +447,14 @@ function isComplexFormattedText(raw) {
   return false;
 }
 
-function formatEngineBadge(engineUsed) {
-  if (!engineUsed) return { label: "Google", tone: "google" };
-  const lower = String(engineUsed).toLowerCase();
-  if (lower === "llm") return { label: "LLM", tone: "llm" };
-  if (lower === "mymemory") return { label: "MyMemory", tone: "mymemory" };
-  if (lower === "gtx" || lower === "dict-chrome-ex" || lower === "google") {
+function formatEngineBadge(engineUsed, fallback = "google") {
+  const norm = String(engineUsed || fallback).toLowerCase();
+  if (norm === "llm") return { label: "LLM", tone: "llm" };
+  if (norm === "mymemory") return { label: "MyMemory", tone: "mymemory" };
+  if (norm === "gtx" || norm === "dict-chrome-ex" || norm === "google") {
     return { label: "Google", tone: "google" };
   }
-  return { label: engineUsed.toUpperCase(), tone: "default" };
+  return { label: norm.toUpperCase(), tone: "default" };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -559,18 +555,6 @@ async function translateWithMtFallback(text, to, signal) {
   }
 }
 
-function buildLlmPrompt(text, targetLang) {
-  const lang = targetLangName(targetLang);
-  return `Translate the following text to ${lang}.
-Strict requirements:
-1. Preserve all structural formatting exactly: bullet lists (•, -, *), numbered steps, indentations, line breaks, and Markdown.
-2. DO NOT translate, change, or rename code, function calls, parameters, variable names, URLs, or technical identifiers.
-3. Return ONLY the translated content. No explanations, no introductory text, no conversational phrases.
-
-Text to translate:
-${text}`;
-}
-
 function cleanLlmOutput(output, originalText) {
   let text = output.trim();
   if (!originalText.trim().startsWith("```") && text.startsWith("```") && text.endsWith("```")) {
@@ -585,23 +569,25 @@ async function translateWithLlmOneshot(text, targetLang, sessionId, timeoutMs, s
     throw new Error("Hermes host.request RPC unavailable");
   }
 
-  const prompt = buildLlmPrompt(text, targetLang);
+  const prompt = `Translate the following text to ${targetLangName(targetLang)}. Output ONLY the translation directly without quotes, preamble, or conversational comments:\n\n${text}`;
+  const timeoutLimit = Math.max(10000, timeoutMs || 30000);
   const timeoutCtrl = new AbortController();
-  const timer = setTimeout(() => timeoutCtrl.abort(), timeoutMs || 3500);
+  const timer = setTimeout(() => timeoutCtrl.abort(), timeoutLimit);
 
   const abortPromise = new Promise((_, reject) => {
     const onAbort = () => reject(new Error("LLM translation aborted"));
     if (signal?.aborted) onAbort();
     else signal?.addEventListener("abort", onAbort, { once: true });
-    timeoutCtrl.signal.addEventListener("abort", () => reject(new Error("LLM translation timed out")), {
-      once: true,
-    });
+    timeoutCtrl.signal.addEventListener("abort", () => {
+      reject(new Error(`LLM translation timed out (${Math.round(timeoutLimit / 1000)}s)`));
+    }, { once: true });
   });
 
   try {
     const rpcPromise = host.request("llm.oneshot", {
-      instructions: "You are a professional, accurate technical translator.",
+      instructions: "You are a fast, professional translator.",
       input: prompt,
+      task: "translation",
       session_id: sessionId || null,
       temperature: 0.1,
       max_tokens: 2048,
@@ -610,7 +596,7 @@ async function translateWithLlmOneshot(text, targetLang, sessionId, timeoutMs, s
     const res = await Promise.race([rpcPromise, abortPromise]);
     const payload = res?.result || res || {};
     const rawText = payload.text || payload.output || "";
-    if (!rawText.trim()) throw new Error("Empty translation from LLM oneshot");
+    if (!rawText.trim()) throw new Error("Empty translation from LLM");
 
     return cleanLlmOutput(rawText, text);
   } finally {
@@ -664,10 +650,13 @@ async function executeTranslate(input, signal) {
           if (r.status === "fulfilled") {
             return { lang, text: r.value.text, engineUsed: "llm" };
           }
-          return { lang, text: "", error: r.reason?.message || String(r.reason) };
+          return { lang, text: "", engineUsed: "llm", error: r.reason?.message || String(r.reason) };
         });
         return { detected: scriptGuess, results };
       }
+
+      const firstRejected = llmSettled.find((r) => r.status === "rejected");
+      const errMsg = firstRejected?.reason?.message || "LLM translation failed";
 
       if (mode === "llm") {
         return {
@@ -675,7 +664,8 @@ async function executeTranslate(input, signal) {
           results: targetsToTranslate.map((lang) => ({
             lang,
             text: "",
-            error: "LLM translation failed",
+            engineUsed: "llm",
+            error: errMsg,
           })),
         };
       }
@@ -686,6 +676,7 @@ async function executeTranslate(input, signal) {
           results: targetsToTranslate.map((lang) => ({
             lang,
             text: "",
+            engineUsed: "llm",
             error: llmErr?.message || String(llmErr),
           })),
         };
@@ -713,7 +704,7 @@ async function executeTranslate(input, signal) {
       const unshielded = unshieldTokens(result.value.text, tokens);
       return { lang, text: unshielded, engineUsed: result.value.engineUsed };
     }
-    return { lang, text: "", error: result.reason?.message || "Translation failed" };
+    return { lang, text: "", engineUsed: "google", error: result.reason?.message || "Translation failed" };
   });
 
   const useful = dropSource
@@ -910,7 +901,6 @@ function isEditableElement(node) {
 
 function SelectionPopupHost({ ctx }) {
   const settings = useValue(settingsAtom);
-  const panelOpen = useValue(panelOpenAtom);
   const t = useT();
 
   const [view, setView] = useState(null);
@@ -931,6 +921,21 @@ function SelectionPopupHost({ ctx }) {
     setView(null);
   }, []);
 
+  const openTranslatePanel = useCallback(() => {
+    panelOpenAtom.set(true);
+    if (host && typeof host.revealPane === "function") {
+      try {
+        host.revealPane("translate-selection:pane");
+        return;
+      } catch {}
+    }
+    if (ctx && typeof ctx.runAction === "function") {
+      try {
+        ctx.runAction("view.toggleRightSidebar");
+      } catch {}
+    }
+  }, [ctx]);
+
   const runTranslation = useCallback(
     async (text, truncated, place) => {
       const id = ++sequenceRef.current;
@@ -944,11 +949,14 @@ function SelectionPopupHost({ ctx }) {
       const currentCfg = settingsAtom.get();
       const targets = currentCfg.targets
         .split(/[,;\s]+/)
-        .map((t) => t.trim().toLowerCase())
+        .map((item) => item.trim().toLowerCase())
         .filter(Boolean);
 
       const focusedSid =
-        host?.state?.focusedSessionId?.get?.() || host?.state?.activeSessionId?.get?.() || undefined;
+        host?.state?.focusedSessionId?.get?.() ||
+        host?.state?.activeSessionId?.get?.() ||
+        host?.state?.focusedStoredSessionId?.get?.() ||
+        undefined;
 
       try {
         const output = await executeTranslate(
@@ -1042,6 +1050,7 @@ function SelectionPopupHost({ ctx }) {
   useEffect(() => {
     ensurePopupStyles(settings);
 
+    // Left click only: button 0
     const onMouseUp = (e) => {
       if (e.button !== 0) return;
       if (rootRef.current && e.target instanceof Node && rootRef.current.contains(e.target)) return;
@@ -1097,24 +1106,29 @@ function SelectionPopupHost({ ctx }) {
 
   const enabled = settings.autoPopup !== false;
 
-  // Statusbar Chip Element
+  // Toggle button in status bar (Item 3 & Item 10)
   const chipNode = h("button", {
     key: "chip",
-    className: "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] transition-colors hover:bg-[var(--chrome-action-hover,rgba(255,255,255,0.08))]",
+    className: "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] transition-colors hover:bg-[var(--chrome-action-hover,rgba(255,255,255,0.08))]",
     style: {
       background: "transparent",
       border: "none",
       cursor: "pointer",
       color: enabled ? "var(--ui-accent)" : "var(--ui-text-tertiary)",
     },
-    title: `${t("autoPopup")}: ${enabled ? t("enabled") : t("disabled")}. ${t("statusChipTip")}`,
+    title: t("statusChipTip"),
     onClick: () => {
       const next = !enabled;
       patchSettings({ autoPopup: next });
-      host?.notify?.({
-        kind: "info",
-        message: `${t("autoPopup")}: ${next ? t("enabled") : t("disabled")}`,
-      });
+      if (next) {
+        openTranslatePanel();
+        host?.notify?.({ kind: "info", message: `${t("panelTitle")}: ${t("enabled")}` });
+      } else {
+        if (ctx && typeof ctx.runAction === "function") {
+          try { ctx.runAction("view.toggleRightSidebar"); } catch {}
+        }
+        host?.notify?.({ kind: "info", message: `${t("panelTitle")}: ${t("disabled")}` });
+      }
     },
   },
     h(Codicon, { name: enabled ? "globe" : "circle-outline", size: 12 }),
@@ -1200,7 +1214,7 @@ function SelectionPopupHost({ ctx }) {
       ),
 
       !view.loading && !view.error && (view.results || []).map((result, idx) => {
-        const badge = formatEngineBadge(result.engineUsed);
+        const badge = formatEngineBadge(result.engineUsed, settings.engineMode === "llm" ? "llm" : "google");
         return h("div", {
           key: idx,
           className: "hermes-tr-row",
@@ -1239,18 +1253,12 @@ function SelectionPopupHost({ ctx }) {
           className: "hermes-tr-btn-ghost",
           onClick: (e) => {
             e.stopPropagation();
-            const next = !panelOpenAtom.get();
-            panelOpenAtom.set(next);
-            if (ctx && typeof ctx.runAction === "function") {
-              try {
-                ctx.runAction("view.toggleRightSidebar");
-              } catch {}
-            }
+            openTranslatePanel();
           },
-          title: panelOpen ? t("hidePanel") : t("openPanel"),
+          title: t("openPanel"),
         },
           h(Codicon, { name: "layout-sidebar-right", size: 12 }),
-          panelOpen ? t("hidePanel") : t("openPanel")
+          t("openPanel")
         )
       )
     );
@@ -1278,6 +1286,7 @@ function TranslationPane({ ctx }) {
   const [themeDraft, setThemeDraft] = useState(settings.themePreset || "amber");
   const [uiLangDraft, setUiLangDraft] = useState(settings.uiLang || "auto");
   const [debounceDraft, setDebounceDraft] = useState(String(settings.debounceMs || 280));
+  const [llmTimeoutDraft, setLlmTimeoutDraft] = useState(String(settings.llmTimeoutMs || 30000));
   const [historyModeDraft, setHistoryModeDraft] = useState(settings.historyMode || "all");
   const [autoPopupDraft, setAutoPopupDraft] = useState(settings.autoPopup !== false);
 
@@ -1298,7 +1307,10 @@ function TranslationPane({ ctx }) {
       .filter(Boolean);
 
     const focusedSid =
-      host?.state?.focusedSessionId?.get?.() || host?.state?.activeSessionId?.get?.() || undefined;
+      host?.state?.focusedSessionId?.get?.() ||
+      host?.state?.activeSessionId?.get?.() ||
+      host?.state?.focusedStoredSessionId?.get?.() ||
+      undefined;
 
     try {
       const output = await executeTranslate(
@@ -1362,46 +1374,37 @@ function TranslationPane({ ctx }) {
       fontSize: "0.8125rem",
     },
   },
-    // 1. Header Toolbar
+    // 1. Header Toolbar (Bug 1: fully responsive, buttons never get squeezed out)
     h("div", {
-      className: "flex items-center justify-between pb-2 border-b border-[var(--ui-stroke-secondary)]",
+      className: "flex items-center justify-between gap-1 pb-2 border-b border-[var(--ui-stroke-secondary)] w-full min-w-0 overflow-hidden",
     },
       h("div", {
-        className: "flex items-center gap-1.5 font-semibold text-xs tracking-wide uppercase",
+        className: "flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden",
       },
-        h(Codicon, { name: "globe", size: 14 }),
-        t("panelTitle"),
+        h(Codicon, { name: "globe", size: 14, className: "shrink-0 text-[var(--ui-accent)]" }),
+        h("span", {
+          className: "font-bold text-xs tracking-wide uppercase truncate",
+          title: t("panelTitle"),
+        }, t("panelTitle")),
         h(Badge, {
           variant: settings.engineMode === "llm" ? "default" : "outline",
-          className: "ml-1 text-[10px]",
-        }, settings.engineMode.toUpperCase()),
-        h("button", {
-          className: "hermes-tr-btn-ghost text-[10px] ml-1",
-          style: { padding: "1px 4px" },
-          title: t("statusChipTip"),
-          onClick: () => {
-            const next = !settings.autoPopup;
-            patchSettings({ autoPopup: next });
-            setAutoPopupDraft(next);
-            host?.notify?.({ kind: "info", message: `${t("autoPopup")}: ${next ? t("enabled") : t("disabled")}` });
-          },
-        },
-          h(Codicon, { name: settings.autoPopup ? "check" : "circle-outline", size: 11 }),
-          settings.autoPopup ? "Авто" : "Пауза"
-        )
+          className: "shrink-0 text-[9px] px-1.5 py-0 h-4 leading-none uppercase",
+        }, settings.engineMode)
       ),
-      h("div", { className: "flex items-center gap-1" },
+      h("div", {
+        className: "flex items-center gap-0.5 shrink-0 ml-auto",
+      },
         h(Button, {
           size: "sm",
           variant: showSettings ? "default" : "ghost",
-          className: "size-7 p-0",
+          className: "size-6 p-0 hover:bg-[var(--chrome-action-hover)]",
           title: t("settings"),
           onClick: () => setShowSettings(!showSettings),
         }, h(Codicon, { name: "settings-gear", size: 13 })),
         history.length > 0 && h(Button, {
           size: "sm",
           variant: "ghost",
-          className: "size-7 p-0",
+          className: "size-6 p-0 hover:bg-[var(--chrome-action-hover)]",
           title: t("clearHistory"),
           onClick: () => {
             historyAtom.set([]);
@@ -1411,10 +1414,10 @@ function TranslationPane({ ctx }) {
         h(Button, {
           size: "sm",
           variant: "ghost",
-          className: "size-7 p-0",
+          className: "size-6 p-0 hover:bg-[var(--chrome-action-hover)]",
           title: t("closePanel"),
           onClick: closeSidebar,
-        }, h(Codicon, { name: "close", size: 14 }))
+        }, h(Codicon, { name: "close", size: 13 }))
       )
     ),
 
@@ -1422,15 +1425,53 @@ function TranslationPane({ ctx }) {
     showSettings && h("div", {
       className: "p-3 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-2.5 text-xs",
     },
-      // Target languages
-      h("div", { className: "space-y-1" },
-        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("targetLangs")),
+      // Target languages with quick-pick chips & ISO link (Bug 4)
+      h("div", { className: "space-y-1.5" },
+        h("div", { className: "flex justify-between items-baseline" },
+          h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("targetLangs")),
+          h("a", {
+            href: "#",
+            onClick: (e) => {
+              e.preventDefault();
+              const url = "https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes";
+              if (ctx?.os?.openExternal) ctx.os.openExternal(url);
+              else window.open(url, "_blank");
+            },
+            className: "text-[10px] text-[var(--ui-accent)] hover:underline inline-flex items-center gap-0.5 cursor-pointer",
+            title: "Wikipedia: List of ISO 639-1 language codes",
+          },
+            h(Codicon, { name: "link-external", size: 10 }),
+            t("langCodesLink")
+          )
+        ),
         h(Input, {
           className: "h-7 text-xs",
           value: targetDraft,
-          placeholder: "ru, en, de, zh",
+          placeholder: "ru, en, de, zh, ja",
           onChange: (e) => setTargetDraft(e.target.value),
-        })
+        }),
+        // Quick-pick chips for popular languages
+        h("div", { className: "flex flex-wrap gap-1 pt-0.5" },
+          ["ru", "en", "de", "fr", "es", "zh", "ja", "ko", "it", "tr", "uk"].map((code) => {
+            const isSelected = targetDraft.toLowerCase().split(/[,;\s]+/).includes(code);
+            return h("button", {
+              key: code,
+              type: "button",
+              disabled: isSelected,
+              className: `text-[10px] px-1.5 py-0.5 rounded border transition-colors ${
+                isSelected
+                  ? "opacity-40 border-[var(--ui-stroke-secondary)] bg-transparent text-[var(--ui-text-tertiary)] cursor-default"
+                  : "border-[var(--ui-stroke-secondary)] bg-[var(--background)] text-[var(--ui-text-primary)] hover:border-[var(--ui-accent)] hover:text-[var(--ui-accent)] cursor-pointer"
+              }`,
+              title: `+ ${code.toUpperCase()} (${targetLangName(code)})`,
+              onClick: () => {
+                const current = targetDraft.trim();
+                const next = current ? `${current}, ${code}` : code;
+                setTargetDraft(next);
+              },
+            }, `+ ${code}`);
+          })
+        )
       ),
 
       // Engine Mode
@@ -1447,6 +1488,24 @@ function TranslationPane({ ctx }) {
             h(SelectItem, { value: "auto" }, t("modeAuto")),
             h(SelectItem, { value: "fast" }, t("modeFast")),
             h(SelectItem, { value: "llm" }, t("modeLlm"))
+          )
+        )
+      ),
+
+      // LLM Timeout Picker
+      h("div", { className: "space-y-1" },
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("llmTimeout")),
+        h(Select, {
+          value: llmTimeoutDraft,
+          onValueChange: (v) => setLlmTimeoutDraft(v),
+        },
+          h(SelectTrigger, { className: "h-7 text-xs w-full" },
+            h(SelectValue, { placeholder: t("llmTimeout") })
+          ),
+          h(SelectContent, null,
+            h(SelectItem, { value: "15000" }, "15s"),
+            h(SelectItem, { value: "30000" }, "30s (Default)"),
+            h(SelectItem, { value: "60000" }, "60s (Thinking models)")
           )
         )
       ),
@@ -1545,6 +1604,7 @@ function TranslationPane({ ctx }) {
               historyMode: historyModeDraft,
               uiLang: uiLangDraft,
               debounceMs: parseInt(debounceDraft, 10) || 280,
+              llmTimeoutMs: parseInt(llmTimeoutDraft, 10) || 30000,
               autoPopup: autoPopupDraft,
             });
             setShowSettings(false);
@@ -1588,7 +1648,7 @@ function TranslationPane({ ctx }) {
 
     h(Separator, null),
 
-    // 4. History Feed
+    // 4. History Feed (with auto-scroll ref and high-contrast card styling)
     h("div", {
       ref: historyListRef,
       className: "flex-1 min-h-0 overflow-y-auto space-y-3 pr-1",
@@ -1603,8 +1663,11 @@ function TranslationPane({ ctx }) {
             title: t("emptyPanel"),
             description: t("emptyDesc"),
           })
-        : history.map((item) =>
-            h("div", {
+        : history.map((item) => {
+            const cardEngine = item.results[0]?.engineUsed || (settings.engineMode === "llm" ? "llm" : "google");
+            const headerBadge = formatEngineBadge(cardEngine, settings.engineMode === "llm" ? "llm" : "google");
+
+            return h("div", {
               key: item.id,
               className: "hermes-tr-card p-3 space-y-2 text-xs",
             },
@@ -1614,12 +1677,9 @@ function TranslationPane({ ctx }) {
               },
                 h("div", { className: "flex items-center gap-1.5 font-mono font-semibold uppercase text-[var(--ui-accent)]" },
                   h("span", null, item.detected ? `${item.detected} → ${item.results.map((r) => r.lang).join(", ")}` : "Перевод"),
-                  item.results.length > 0 && (() => {
-                    const badge = formatEngineBadge(item.results[0].engineUsed);
-                    return h("span", {
-                      className: `hermes-tr-badge hermes-tr-badge-${badge.tone}`,
-                    }, badge.label);
-                  })()
+                  h("span", {
+                    className: `hermes-tr-badge hermes-tr-badge-${headerBadge.tone}`,
+                  }, headerBadge.label)
                 ),
                 h("button", {
                   className: "hermes-tr-btn-ghost text-[10px]",
@@ -1640,10 +1700,10 @@ function TranslationPane({ ctx }) {
                 }, item.sourceText)
               ),
 
-              // Target Translations
+              // Target Translations (Hero element)
               h("div", { className: "space-y-2 pt-1" },
                 item.results.map((r, rIdx) => {
-                  const badge = formatEngineBadge(r.engineUsed);
+                  const badge = formatEngineBadge(r.engineUsed, settings.engineMode === "llm" ? "llm" : "google");
                   return h("div", {
                     key: rIdx,
                     className: "p-2 rounded bg-[var(--background)] border border-[var(--ui-stroke-secondary)] cursor-pointer hover:border-[var(--ui-accent)] transition-all",
@@ -1669,8 +1729,8 @@ function TranslationPane({ ctx }) {
                   );
                 })
               )
-            )
-          )
+            );
+          })
     )
   );
 }
@@ -1690,7 +1750,9 @@ async function translateClipboard() {
   const text = (clipText || "").trim();
   if (!text) {
     host?.notify?.({ kind: "info", message: "Буфер обмена пуст. Открываю панель перевода…" });
-    panelOpenAtom.set(true);
+    if (host && typeof host.revealPane === "function") {
+      try { host.revealPane("translate-selection:pane"); } catch {}
+    }
     return;
   }
 
@@ -1701,7 +1763,10 @@ async function translateClipboard() {
     .filter(Boolean);
 
   const focusedSid =
-    host?.state?.focusedSessionId?.get?.() || host?.state?.activeSessionId?.get?.() || undefined;
+    host?.state?.focusedSessionId?.get?.() ||
+    host?.state?.activeSessionId?.get?.() ||
+    host?.state?.focusedStoredSessionId?.get?.() ||
+    undefined;
 
   try {
     host?.notify?.({ kind: "info", message: `Перевожу буфер (${text.slice(0, 30)}…)` });
@@ -1761,7 +1826,10 @@ async function translateLastAssistantMessage() {
     .filter(Boolean);
 
   const focusedSid =
-    host?.state?.focusedSessionId?.get?.() || host?.state?.activeSessionId?.get?.() || undefined;
+    host?.state?.focusedSessionId?.get?.() ||
+    host?.state?.activeSessionId?.get?.() ||
+    host?.state?.focusedStoredSessionId?.get?.() ||
+    undefined;
 
   try {
     host?.notify?.({ kind: "info", message: "Перевожу последний ответ ассистента…" });
@@ -1783,7 +1851,9 @@ async function translateLastAssistantMessage() {
         detected: output.detected,
         results: output.results,
       });
-      panelOpenAtom.set(true);
+      if (host && typeof host.revealPane === "function") {
+        try { host.revealPane("translate-selection:pane"); } catch {}
+      }
       host?.notify?.({ kind: "success", message: "✓ Ответ ассистента переведён в панели" });
     }
   } catch (err) {
@@ -1807,10 +1877,15 @@ function setupGlobalHotkeys() {
       return;
     }
 
-    // Alt+P: Toggle persistent side panel
+    // Alt+P: Toggle persistent translation sidebar pane
     if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyP") {
       e.preventDefault();
-      panelOpenAtom.set(!panelOpenAtom.get());
+      if (host && typeof host.revealPane === "function") {
+        try {
+          host.revealPane("translate-selection:pane");
+          return;
+        } catch {}
+      }
       return;
     }
 
@@ -1906,9 +1981,13 @@ export default {
       area: PALETTE_AREA,
       data: {
         id: "translate.panel",
-        label: "Translate: Открыть / закрыть панель перевода (Alt+P)",
+        label: "Translate: Открыть панель перевода (Alt+P)",
         keywords: ["translate", "panel", "sidebar", "боковая", "панель"],
-        run: () => panelOpenAtom.set(!panelOpenAtom.get()),
+        run: () => {
+          if (host && typeof host.revealPane === "function") {
+            try { host.revealPane("translate-selection:pane"); } catch {}
+          }
+        },
       },
     });
 
