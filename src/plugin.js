@@ -8,7 +8,8 @@
  * - Automatic fail-safe fallback to Token-Shielded MT if LLM times out or errors
  *
  * Fully self-contained ECMAScript Module (ESM) compatible with all Hermes Desktop versions.
- * Uses standard React.createElement (h) and resilient native i18n hooks without external dependencies.
+ * Employs a dedicated floating companion panel (as proven by BrokeSkill/Hermes-Insight)
+ * to ensure conflict-free coexistence with core Files/Review layout panes.
  *
  * @module hermes-translate-selection-plugin
  * @author Realmagnum
@@ -37,7 +38,6 @@ import {
   EmptyState,
   ErrorState,
   Codicon,
-  PANES_AREA,
   PALETTE_AREA,
   STATUSBAR_AREAS,
 } from "@hermes/plugin-sdk";
@@ -60,7 +60,7 @@ const DEFAULT_SETTINGS = {
   debounceMs: 280,           // Debounce delay to prevent premature triggers
   historyMode: "all",        // 'all' | 'latest' | 'off'
   historyLimit: 50,          // Max items in history
-  llmTimeoutMs: 30000,       // 30s timeout for LLM reasoning models
+  llmTimeoutMs: 60000,       // 60s timeout for LLM reasoning models
   maxChars: 1500,            // Character truncation threshold
   maxHeight: 420,            // Popup height cap
   maxWidth: 560,             // Popup width cap
@@ -144,6 +144,7 @@ const LOCALES = {
     close: "Close",
     targetLangs: "Target languages",
     langCodesLink: "ISO 639-1 language codes ↗",
+    selectedLangs: "Active:",
     engineMode: "Engine mode",
     modeAuto: "Auto (Smart Hybrid)",
     modeFast: "Fast MT Only (no LLM)",
@@ -191,6 +192,7 @@ const LOCALES = {
     close: "Закрыть",
     targetLangs: "Целевые языки",
     langCodesLink: "Коды языков (ISO 639-1) ↗",
+    selectedLangs: "Выбрано:",
     engineMode: "Режим перевода",
     modeAuto: "Auto (Smart Hybrid)",
     modeFast: "Fast MT Only (без LLM)",
@@ -447,12 +449,26 @@ function isComplexFormattedText(raw) {
   return false;
 }
 
-function formatEngineBadge(engineUsed, fallback = "google") {
+/**
+ * Individual badges for each translation service:
+ * - Google MT (gtx)
+ * - Google Dict (dict-chrome-ex)
+ * - MyMemory API
+ * - Hermes LLM (oneshot)
+ */
+function formatEngineBadge(engineUsed, fallback = "google-gtx") {
   const norm = String(engineUsed || fallback).toLowerCase();
-  if (norm === "llm") return { label: "LLM", tone: "llm" };
-  if (norm === "mymemory") return { label: "MyMemory", tone: "mymemory" };
-  if (norm === "gtx" || norm === "dict-chrome-ex" || norm === "google") {
-    return { label: "Google", tone: "google" };
+  if (norm === "llm") {
+    return { label: "Hermes LLM", tone: "llm" };
+  }
+  if (norm === "mymemory") {
+    return { label: "MyMemory", tone: "mymemory" };
+  }
+  if (norm === "google-dict" || norm === "dict-chrome-ex") {
+    return { label: "Google Dict", tone: "dict" };
+  }
+  if (norm === "google-gtx" || norm === "gtx" || norm === "google") {
+    return { label: "Google MT", tone: "google" };
   }
   return { label: norm.toUpperCase(), tone: "default" };
 }
@@ -507,7 +523,11 @@ async function fetchGoogle(text, to, clientName, signal) {
 
   if (!translated) throw new Error("Empty translation from Google MT");
   const detected = Array.isArray(body) && typeof body[2] === "string" ? body[2] : "";
-  return { text: translated, detected, engineUsed: "google" };
+  return {
+    text: translated,
+    detected,
+    engineUsed: clientName === "gtx" ? "google-gtx" : "google-dict",
+  };
 }
 
 async function fetchMyMemory(text, to, signal) {
@@ -534,20 +554,26 @@ async function translateWithMtFallback(text, to, signal) {
   const hit = memoryCache.get(key);
   if (hit !== undefined) return hit;
 
+  // Tier 1: Google gtx (Google MT)
   try {
     const entry = await fetchGoogle(text, to, "gtx", signal);
+    entry.engineUsed = "google-gtx";
     rememberCache(key, entry);
     return entry;
   } catch (errGtx) {}
 
+  // Tier 2: Google dict-chrome-ex (Google Dict)
   try {
     const entry = await fetchGoogle(text, to, "dict-chrome-ex", signal);
+    entry.engineUsed = "google-dict";
     rememberCache(key, entry);
     return entry;
   } catch (errDict) {}
 
+  // Tier 3: MyMemory API fallback
   try {
     const entry = await fetchMyMemory(text, to, signal);
+    entry.engineUsed = "mymemory";
     rememberCache(key, entry);
     return entry;
   } catch (errMyMem) {
@@ -570,7 +596,7 @@ async function translateWithLlmOneshot(text, targetLang, sessionId, timeoutMs, s
   }
 
   const prompt = `Translate the following text to ${targetLangName(targetLang)}. Output ONLY the translation directly without quotes, preamble, or conversational comments:\n\n${text}`;
-  const timeoutLimit = Math.max(10000, timeoutMs || 30000);
+  const timeoutLimit = Math.max(15000, timeoutMs || 60000);
   const timeoutCtrl = new AbortController();
   const timer = setTimeout(() => timeoutCtrl.abort(), timeoutLimit);
 
@@ -704,7 +730,7 @@ async function executeTranslate(input, signal) {
       const unshielded = unshieldTokens(result.value.text, tokens);
       return { lang, text: unshielded, engineUsed: result.value.engineUsed };
     }
-    return { lang, text: "", engineUsed: "google", error: result.reason?.message || "Translation failed" };
+    return { lang, text: "", engineUsed: "google-gtx", error: result.reason?.message || "Translation failed" };
   });
 
   const useful = dropSource
@@ -802,28 +828,33 @@ function ensurePopupStyles(settings) {
     .hermes-tr-badge {
       display: inline-flex;
       align-items: center;
-      padding: 1px 4px;
-      border-radius: 3px;
+      padding: 1px 5px;
+      border-radius: 4px;
       font-size: 9px;
       font-weight: 700;
       letter-spacing: 0.04em;
-      line-height: 1.2;
+      line-height: 1.25;
       text-transform: uppercase;
     }
     .hermes-tr-badge-google {
-      background: rgba(66, 133, 244, 0.16);
+      background: rgba(59, 130, 246, 0.16);
       color: #60a5fa;
-      border: 1px solid rgba(66, 133, 244, 0.3);
+      border: 1px solid rgba(59, 130, 246, 0.35);
     }
-    .hermes-tr-badge-llm {
-      background: rgba(234, 179, 8, 0.16);
-      color: #facc15;
-      border: 1px solid rgba(234, 179, 8, 0.35);
+    .hermes-tr-badge-dict {
+      background: rgba(6, 182, 212, 0.16);
+      color: #22d3ee;
+      border: 1px solid rgba(6, 182, 212, 0.35);
     }
     .hermes-tr-badge-mymemory {
       background: rgba(168, 85, 247, 0.16);
       color: #c084fc;
-      border: 1px solid rgba(168, 85, 247, 0.3);
+      border: 1px solid rgba(168, 85, 247, 0.35);
+    }
+    .hermes-tr-badge-llm {
+      background: rgba(234, 179, 8, 0.18);
+      color: #facc15;
+      border: 1px solid rgba(234, 179, 8, 0.4);
     }
     .hermes-tr-card {
       border-radius: var(--radius-lg, 8px);
@@ -890,7 +921,7 @@ function FormattedTranslation({ text, settings }) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   6. SELECTION POPUP HOST & STATUSBAR COMPONENT
+   6. SELECTION POPUP HOST, COMPANION SIDEBAR & STATUSBAR
    ══════════════════════════════════════════════════════════════════════════ */
 
 function isEditableElement(node) {
@@ -901,6 +932,7 @@ function isEditableElement(node) {
 
 function SelectionPopupHost({ ctx }) {
   const settings = useValue(settingsAtom);
+  const panelOpen = useValue(panelOpenAtom);
   const t = useT();
 
   const [view, setView] = useState(null);
@@ -921,20 +953,9 @@ function SelectionPopupHost({ ctx }) {
     setView(null);
   }, []);
 
-  const openTranslatePanel = useCallback(() => {
-    panelOpenAtom.set(true);
-    if (host && typeof host.revealPane === "function") {
-      try {
-        host.revealPane("translate-selection:pane");
-        return;
-      } catch {}
-    }
-    if (ctx && typeof ctx.runAction === "function") {
-      try {
-        ctx.runAction("view.toggleRightSidebar");
-      } catch {}
-    }
-  }, [ctx]);
+  const toggleTranslatePanel = useCallback(() => {
+    panelOpenAtom.set(!panelOpenAtom.get());
+  }, []);
 
   const runTranslation = useCallback(
     async (text, truncated, place) => {
@@ -1068,7 +1089,10 @@ function SelectionPopupHost({ ctx }) {
     };
 
     const onKeyDown = (e) => {
-      if (e.key === "Escape") hide();
+      if (e.key === "Escape") {
+        hide();
+        if (panelOpenAtom.get()) panelOpenAtom.set(false);
+      }
     };
 
     const onScrollOrResize = (e) => {
@@ -1076,8 +1100,7 @@ function SelectionPopupHost({ ctx }) {
       if (e && e.target instanceof Element) {
         if (
           e.target.closest?.(`.${POPUP_CLASS}`) ||
-          e.target.closest?.(".hermes-translate-panel") ||
-          e.target.closest?.('[data-pane-id*="translate"]')
+          e.target.closest?.(".hermes-translate-panel")
         ) {
           return;
         }
@@ -1106,10 +1129,10 @@ function SelectionPopupHost({ ctx }) {
 
   const enabled = settings.autoPopup !== false;
 
-  // Toggle button in status bar (Item 3 & Item 10)
+  // Status Bar Chip (Item 3 & Item 10)
   const chipNode = h("button", {
     key: "chip",
-    className: "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] transition-colors hover:bg-[var(--chrome-action-hover,rgba(255,255,255,0.08))]",
+    className: "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] transition-colors hover:bg-[var(--chrome-action-hover,rgba(255,255,255,0.08))]",
     style: {
       background: "transparent",
       border: "none",
@@ -1121,12 +1144,10 @@ function SelectionPopupHost({ ctx }) {
       const next = !enabled;
       patchSettings({ autoPopup: next });
       if (next) {
-        openTranslatePanel();
+        panelOpenAtom.set(true);
         host?.notify?.({ kind: "info", message: `${t("panelTitle")}: ${t("enabled")}` });
       } else {
-        if (ctx && typeof ctx.runAction === "function") {
-          try { ctx.runAction("view.toggleRightSidebar"); } catch {}
-        }
+        panelOpenAtom.set(false);
         host?.notify?.({ kind: "info", message: `${t("panelTitle")}: ${t("disabled")}` });
       }
     },
@@ -1137,6 +1158,7 @@ function SelectionPopupHost({ ctx }) {
     )
   );
 
+  // Floating Selection Popup
   let popupNode = null;
   if (view) {
     const bg = hexToRgba(settings.bgColor, settings.bgOpacity / 100);
@@ -1214,7 +1236,7 @@ function SelectionPopupHost({ ctx }) {
       ),
 
       !view.loading && !view.error && (view.results || []).map((result, idx) => {
-        const badge = formatEngineBadge(result.engineUsed, settings.engineMode === "llm" ? "llm" : "google");
+        const badge = formatEngineBadge(result.engineUsed, settings.engineMode === "llm" ? "llm" : "google-gtx");
         return h("div", {
           key: idx,
           className: "hermes-tr-row",
@@ -1253,25 +1275,34 @@ function SelectionPopupHost({ ctx }) {
           className: "hermes-tr-btn-ghost",
           onClick: (e) => {
             e.stopPropagation();
-            openTranslatePanel();
+            toggleTranslatePanel();
           },
-          title: t("openPanel"),
+          title: panelOpen ? t("hidePanel") : t("openPanel"),
         },
           h(Codicon, { name: "layout-sidebar-right", size: 12 }),
-          t("openPanel")
+          panelOpen ? t("hidePanel") : t("openPanel")
         )
       )
     );
   }
 
-  return h(React.Fragment, null, popupNode, chipNode);
+  // Floating Side Panel (BrokeSkill/Hermes-Insight architecture: zero conflict with Files)
+  const panelNode = panelOpen
+    ? h(FloatingTranslationPanel, {
+        key: "floating-panel",
+        ctx,
+        onClose: () => panelOpenAtom.set(false),
+      })
+    : null;
+
+  return h(React.Fragment, null, popupNode, panelNode, chipNode);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   7. TRANSLATION SIDE PANEL (PERSISTENT RIGHT RAIL)
+   7. COMPANION TRANSLATION PANEL (FLOATING RIGHT PANEL)
    ══════════════════════════════════════════════════════════════════════════ */
 
-function TranslationPane({ ctx }) {
+function FloatingTranslationPanel({ ctx, onClose }) {
   const settings = useValue(settingsAtom);
   const history = useValue(historyAtom);
   const t = useT();
@@ -1281,12 +1312,13 @@ function TranslationPane({ ctx }) {
   const [copiedId, setCopiedId] = useState("");
   const [showSettings, setShowSettings] = useState(false);
 
+  // Settings form draft state
   const [targetDraft, setTargetDraft] = useState(settings.targets);
   const [modeDraft, setModeDraft] = useState(settings.engineMode);
   const [themeDraft, setThemeDraft] = useState(settings.themePreset || "amber");
   const [uiLangDraft, setUiLangDraft] = useState(settings.uiLang || "auto");
   const [debounceDraft, setDebounceDraft] = useState(String(settings.debounceMs || 280));
-  const [llmTimeoutDraft, setLlmTimeoutDraft] = useState(String(settings.llmTimeoutMs || 30000));
+  const [llmTimeoutDraft, setLlmTimeoutDraft] = useState(String(settings.llmTimeoutMs || 60000));
   const [historyModeDraft, setHistoryModeDraft] = useState(settings.historyMode || "all");
   const [autoPopupDraft, setAutoPopupDraft] = useState(settings.autoPopup !== false);
 
@@ -1357,26 +1389,43 @@ function TranslationPane({ ctx }) {
     setTimeout(() => setCopiedId(""), 2000);
   };
 
-  const closeSidebar = () => {
-    panelOpenAtom.set(false);
-    if (ctx && typeof ctx.runAction === "function") {
-      try {
-        ctx.runAction("view.toggleRightSidebar");
-      } catch {}
-    }
+  const panelStyle = {
+    position: "fixed",
+    right: 12,
+    top: 56,
+    bottom: 36,
+    width: 340,
+    maxWidth: "calc(100vw - 24px)",
+    zIndex: 120,
+    display: "flex",
+    flexDirection: "column",
+    minHeight: 0,
+    background: hexToRgba(settings.bgColor, settings.bgOpacity / 100),
+    color: settings.textColor,
+    border: `1px solid ${hexToRgba(settings.accentColor, 0.45)}`,
+    borderRadius: `${settings.borderRadius || 10}px`,
+    boxShadow: "0 12px 36px -8px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.25)",
+    fontFamily: "var(--font-sans, inherit)",
+    fontSize: "var(--conversation-text-font-size, 0.8125rem)",
+    backdropFilter: "blur(14px)",
+    WebkitBackdropFilter: "blur(14px)",
+    overflow: "hidden",
   };
 
+  const activeLangsDescription = useMemo(() => {
+    const list = targetDraft.split(/[,;\s]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+    if (!list.length) return "None";
+    return list.map(c => targetLangName(c)).join(", ");
+  }, [targetDraft]);
+
   return h("div", {
-    className: "hermes-translate-panel flex flex-col h-full overflow-hidden p-3 space-y-3",
-    style: {
-      color: "var(--ui-text-primary)",
-      fontFamily: "var(--font-sans, inherit)",
-      fontSize: "0.8125rem",
-    },
+    className: "hermes-translate-panel p-3 space-y-3",
+    style: panelStyle,
+    onMouseDown: (e) => e.stopPropagation(),
   },
-    // 1. Header Toolbar (Bug 1: fully responsive, buttons never get squeezed out)
+    // 1. Header Toolbar: Globe, Mode Pill Switcher, Auto/Pause toggle, Settings, Clear, Close [X]
     h("div", {
-      className: "flex items-center justify-between gap-1 pb-2 border-b border-[var(--ui-stroke-secondary)] w-full min-w-0 overflow-hidden",
+      className: "flex items-center justify-between gap-1 pb-2 border-b border-[var(--ui-stroke-secondary)] w-full min-w-0 shrink-0",
     },
       h("div", {
         className: "flex items-center gap-1.5 min-w-0 flex-1 overflow-hidden",
@@ -1386,11 +1435,55 @@ function TranslationPane({ ctx }) {
           className: "font-bold text-xs tracking-wide uppercase truncate",
           title: t("panelTitle"),
         }, t("panelTitle")),
-        h(Badge, {
-          variant: settings.engineMode === "llm" ? "default" : "outline",
-          className: "shrink-0 text-[9px] px-1.5 py-0 h-4 leading-none uppercase",
-        }, settings.engineMode)
+
+        // Interactive Mode Switcher Pill (Item 3: clicks directly toggle Auto ⇄ Fast MT ⇄ LLM)
+        h("button", {
+          type: "button",
+          className: "shrink-0 flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border transition-all cursor-pointer font-bold uppercase",
+          style: {
+            background: settings.engineMode === "llm" ? "rgba(234, 179, 8, 0.16)" : settings.engineMode === "fast" ? "rgba(59, 130, 246, 0.16)" : "rgba(34, 197, 94, 0.16)",
+            borderColor: settings.engineMode === "llm" ? "rgba(234, 179, 8, 0.45)" : settings.engineMode === "fast" ? "rgba(59, 130, 246, 0.45)" : "rgba(34, 197, 94, 0.45)",
+            color: settings.engineMode === "llm" ? "#facc15" : settings.engineMode === "fast" ? "#60a5fa" : "#4ade80",
+          },
+          title: "Клик: быстро переключить режим (Auto ⇄ Fast MT ⇄ LLM)",
+          onClick: (e) => {
+            e.stopPropagation();
+            const modes = ["auto", "fast", "llm"];
+            const nextIdx = (modes.indexOf(settings.engineMode) + 1) % modes.length;
+            const next = modes[nextIdx];
+            patchSettings({ engineMode: next });
+            setModeDraft(next);
+            host?.notify?.({
+              kind: "info",
+              message: `${t("engineMode")}: ${next.toUpperCase()}`,
+            });
+          },
+        },
+          h(Codicon, {
+            name: settings.engineMode === "llm" ? "sparkle" : settings.engineMode === "fast" ? "zap" : "sync",
+            size: 11,
+          }),
+          settings.engineMode === "fast" ? "FAST MT" : settings.engineMode === "llm" ? "LLM ONLY" : "AUTO"
+        ),
+
+        // Auto-popup quick toggle
+        h("button", {
+          className: "hermes-tr-btn-ghost text-[10px] ml-0.5 shrink-0",
+          style: { padding: "1px 4px" },
+          title: t("statusChipTip"),
+          onClick: () => {
+            const next = !settings.autoPopup;
+            patchSettings({ autoPopup: next });
+            setAutoPopupDraft(next);
+            host?.notify?.({ kind: "info", message: `${t("autoPopup")}: ${next ? t("enabled") : t("disabled")}` });
+          },
+        },
+          h(Codicon, { name: settings.autoPopup ? "check" : "circle-outline", size: 11 }),
+          settings.autoPopup ? "Авто" : "Пауза"
+        )
       ),
+
+      // Right action buttons (Gear, Clear, Close [X])
       h("div", {
         className: "flex items-center gap-0.5 shrink-0 ml-auto",
       },
@@ -1416,21 +1509,23 @@ function TranslationPane({ ctx }) {
           variant: "ghost",
           className: "size-6 p-0 hover:bg-[var(--chrome-action-hover)]",
           title: t("closePanel"),
-          onClick: closeSidebar,
-        }, h(Codicon, { name: "close", size: 13 }))
+          onClick: onClose,
+        }, h(Codicon, { name: "close", size: 14 }))
       )
     ),
 
     // 2. Settings Collapsible Section
     showSettings && h("div", {
-      className: "p-3 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-2.5 text-xs",
+      className: "p-3 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-2.5 text-xs overflow-y-auto max-h-[60vh]",
     },
-      // Target languages with quick-pick chips & ISO link (Bug 4)
+      // Target languages with ISO link & quick chips
       h("div", { className: "space-y-1.5" },
         h("div", { className: "flex justify-between items-baseline" },
           h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("targetLangs")),
           h("a", {
-            href: "#",
+            href: "https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes",
+            target: "_blank",
+            rel: "noreferrer",
             onClick: (e) => {
               e.preventDefault();
               const url = "https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes";
@@ -1438,7 +1533,7 @@ function TranslationPane({ ctx }) {
               else window.open(url, "_blank");
             },
             className: "text-[10px] text-[var(--ui-accent)] hover:underline inline-flex items-center gap-0.5 cursor-pointer",
-            title: "Wikipedia: List of ISO 639-1 language codes",
+            title: "ISO 639-1 language codes reference",
           },
             h(Codicon, { name: "link-external", size: 10 }),
             t("langCodesLink")
@@ -1450,7 +1545,10 @@ function TranslationPane({ ctx }) {
           placeholder: "ru, en, de, zh, ja",
           onChange: (e) => setTargetDraft(e.target.value),
         }),
-        // Quick-pick chips for popular languages
+        h("div", { className: "text-[10px] text-[var(--ui-text-tertiary)] truncate" },
+          `${t("selectedLangs")} ${activeLangsDescription}`
+        ),
+        // Quick-pick chips
         h("div", { className: "flex flex-wrap gap-1 pt-0.5" },
           ["ru", "en", "de", "fr", "es", "zh", "ja", "ko", "it", "tr", "uk"].map((code) => {
             const isSelected = targetDraft.toLowerCase().split(/[,;\s]+/).includes(code);
@@ -1503,9 +1601,10 @@ function TranslationPane({ ctx }) {
             h(SelectValue, { placeholder: t("llmTimeout") })
           ),
           h(SelectContent, null,
-            h(SelectItem, { value: "15000" }, "15s"),
-            h(SelectItem, { value: "30000" }, "30s (Default)"),
-            h(SelectItem, { value: "60000" }, "60s (Thinking models)")
+            h(SelectItem, { value: "15000" }, "15s (Fast)"),
+            h(SelectItem, { value: "30000" }, "30s"),
+            h(SelectItem, { value: "60000" }, "60s (Default)"),
+            h(SelectItem, { value: "120000" }, "120s (Thinking models)")
           )
         )
       ),
@@ -1604,7 +1703,7 @@ function TranslationPane({ ctx }) {
               historyMode: historyModeDraft,
               uiLang: uiLangDraft,
               debounceMs: parseInt(debounceDraft, 10) || 280,
-              llmTimeoutMs: parseInt(llmTimeoutDraft, 10) || 30000,
+              llmTimeoutMs: parseInt(llmTimeoutDraft, 10) || 60000,
               autoPopup: autoPopupDraft,
             });
             setShowSettings(false);
@@ -1620,7 +1719,7 @@ function TranslationPane({ ctx }) {
     ),
 
     // 3. Quick Input / Translate Field
-    h("div", { className: "space-y-1.5" },
+    h("div", { className: "space-y-1.5 shrink-0" },
       h(Textarea, {
         className: "text-xs resize-none font-sans",
         style: { minHeight: "68px" },
@@ -1648,7 +1747,7 @@ function TranslationPane({ ctx }) {
 
     h(Separator, null),
 
-    // 4. History Feed (with auto-scroll ref and high-contrast card styling)
+    // 4. History Feed
     h("div", {
       ref: historyListRef,
       className: "flex-1 min-h-0 overflow-y-auto space-y-3 pr-1",
@@ -1664,8 +1763,8 @@ function TranslationPane({ ctx }) {
             description: t("emptyDesc"),
           })
         : history.map((item) => {
-            const cardEngine = item.results[0]?.engineUsed || (settings.engineMode === "llm" ? "llm" : "google");
-            const headerBadge = formatEngineBadge(cardEngine, settings.engineMode === "llm" ? "llm" : "google");
+            const cardEngine = item.results[0]?.engineUsed || (settings.engineMode === "llm" ? "llm" : "google-gtx");
+            const headerBadge = formatEngineBadge(cardEngine, settings.engineMode === "llm" ? "llm" : "google-gtx");
 
             return h("div", {
               key: item.id,
@@ -1700,10 +1799,10 @@ function TranslationPane({ ctx }) {
                 }, item.sourceText)
               ),
 
-              // Target Translations (Hero element)
+              // Target Translations
               h("div", { className: "space-y-2 pt-1" },
                 item.results.map((r, rIdx) => {
-                  const badge = formatEngineBadge(r.engineUsed, settings.engineMode === "llm" ? "llm" : "google");
+                  const badge = formatEngineBadge(r.engineUsed, settings.engineMode === "llm" ? "llm" : "google-gtx");
                   return h("div", {
                     key: rIdx,
                     className: "p-2 rounded bg-[var(--background)] border border-[var(--ui-stroke-secondary)] cursor-pointer hover:border-[var(--ui-accent)] transition-all",
@@ -1750,9 +1849,7 @@ async function translateClipboard() {
   const text = (clipText || "").trim();
   if (!text) {
     host?.notify?.({ kind: "info", message: "Буфер обмена пуст. Открываю панель перевода…" });
-    if (host && typeof host.revealPane === "function") {
-      try { host.revealPane("translate-selection:pane"); } catch {}
-    }
+    panelOpenAtom.set(true);
     return;
   }
 
@@ -1851,9 +1948,7 @@ async function translateLastAssistantMessage() {
         detected: output.detected,
         results: output.results,
       });
-      if (host && typeof host.revealPane === "function") {
-        try { host.revealPane("translate-selection:pane"); } catch {}
-      }
+      panelOpenAtom.set(true);
       host?.notify?.({ kind: "success", message: "✓ Ответ ассистента переведён в панели" });
     }
   } catch (err) {
@@ -1877,15 +1972,10 @@ function setupGlobalHotkeys() {
       return;
     }
 
-    // Alt+P: Toggle persistent translation sidebar pane
+    // Alt+P: Toggle persistent translation sidebar panel
     if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyP") {
       e.preventDefault();
-      if (host && typeof host.revealPane === "function") {
-        try {
-          host.revealPane("translate-selection:pane");
-          return;
-        } catch {}
-      }
+      panelOpenAtom.set(!panelOpenAtom.get());
       return;
     }
 
@@ -1895,6 +1985,8 @@ function setupGlobalHotkeys() {
       const current = settingsAtom.get();
       const next = current.autoPopup === false;
       patchSettings({ autoPopup: next });
+      if (next) panelOpenAtom.set(true);
+      else panelOpenAtom.set(false);
       host?.notify?.({
         kind: "info",
         message: `Перевод при выделении: ${next ? "Включен" : "Выключен"}`,
@@ -1937,23 +2029,14 @@ export default {
     const initialSettings = loadSettings(ctx.storage);
     settingsAtom.set(initialSettings);
 
-    // 1. Single combined contribution for popup host + status bar chip
+    // 1. Single combined contribution for popup host, floating panel, and status bar chip
     ctx.register({
       id: "selection-popup-host",
       area: STATUSBAR_AREAS.right,
       render: () => h(SelectionPopupHost, { ctx }),
     });
 
-    // 2. Right rail sidebar layout pane (standard placement)
-    ctx.register({
-      id: "pane",
-      area: PANES_AREA,
-      title: "Перевод",
-      data: { placement: "right", width: "340px" },
-      render: () => h(TranslationPane, { ctx }),
-    });
-
-    // 3. Register Palette Commands
+    // 2. Register Palette Commands
     ctx.register({
       id: "palette.translate-clipboard",
       area: PALETTE_AREA,
@@ -1981,13 +2064,9 @@ export default {
       area: PALETTE_AREA,
       data: {
         id: "translate.panel",
-        label: "Translate: Открыть панель перевода (Alt+P)",
+        label: "Translate: Открыть / закрыть панель перевода (Alt+P)",
         keywords: ["translate", "panel", "sidebar", "боковая", "панель"],
-        run: () => {
-          if (host && typeof host.revealPane === "function") {
-            try { host.revealPane("translate-selection:pane"); } catch {}
-          }
-        },
+        run: () => panelOpenAtom.set(!panelOpenAtom.get()),
       },
     });
 
@@ -2002,6 +2081,8 @@ export default {
           const current = settingsAtom.get();
           const next = current.autoPopup === false;
           patchSettings({ autoPopup: next });
+          if (next) panelOpenAtom.set(true);
+          else panelOpenAtom.set(false);
           host?.notify?.({
             kind: "info",
             message: `Перевод при выделении: ${next ? "Включен" : "Выключен"}`,
