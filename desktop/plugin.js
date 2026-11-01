@@ -7,8 +7,8 @@
  * - Complex/structured/code text -> Session LLM via native gateway `llm.oneshot`
  * - Automatic fail-safe fallback to Token-Shielded MT if LLM times out or errors
  *
- * Fully self-contained ECMAScript Module (ESM) compatible with Hermes Desktop plugin loader.
- * Uses standard React.createElement (h) and ctx.i18n / usePluginI18n for reactive multilang support.
+ * Fully self-contained ECMAScript Module (ESM) compatible with all Hermes Desktop versions.
+ * Uses standard React.createElement (h) and resilient native i18n hooks without external dependencies.
  *
  * @module hermes-translate-selection-plugin
  * @author Realmagnum
@@ -16,11 +16,12 @@
  */
 
 import React from "react";
+
+const { useState, useEffect, useRef, useCallback, useLayoutEffect, useMemo } = React;
 import {
   host,
   atom,
   useValue,
-  usePluginI18n,
   Button,
   Input,
   Textarea,
@@ -41,7 +42,6 @@ import {
   STATUSBAR_AREAS,
 } from "@hermes/plugin-sdk";
 
-const { useState, useEffect, useRef, useCallback, useLayoutEffect, useMemo } = React;
 const h = React.createElement;
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -68,6 +68,7 @@ const DEFAULT_SETTINGS = {
   clearance: 52,             // Viewport clearance
   dropSourceLang: true,      // Suppress target language matching detected source
   themePreset: "amber",      // Active color preset
+  uiLang: "auto",            // 'auto' | 'ru' | 'en'
   bgColor: "#2b220a",
   bgOpacity: 97,
   textColor: "#ffd75e",
@@ -153,6 +154,10 @@ const LOCALES = {
     historyLatest: "Keep latest only",
     historyOff: "Disabled",
     autoPopup: "Auto-popup on selection",
+    uiLang: "Interface language",
+    uiLangAuto: "Auto (Follow Hermes)",
+    uiLangRu: "Русский (Russian)",
+    uiLangEn: "English",
     enabled: "Enabled",
     disabled: "Disabled",
     statusChipOn: "Translate: On",
@@ -197,6 +202,10 @@ const LOCALES = {
     historyLatest: "Только последний",
     historyOff: "Отключена",
     autoPopup: "Авто-всплывание при выделении",
+    uiLang: "Язык интерфейса",
+    uiLangAuto: "Авто (как в Hermes)",
+    uiLangRu: "Русский",
+    uiLangEn: "English",
     enabled: "Включен",
     disabled: "Выключен",
     statusChipOn: "Перевод: Вкл",
@@ -212,16 +221,6 @@ const LOCALES = {
     historyCleared: "История очищена",
   },
 };
-
-function useTranslate() {
-  try {
-    if (typeof usePluginI18n === "function") {
-      const t = usePluginI18n(PLUGIN_ID);
-      if (typeof t === "function") return t;
-    }
-  } catch {}
-  return (key) => LOCALES.ru[key] || LOCALES.en[key] || key;
-}
 
 const LANGUAGE_NAMES = {
   ru: "Russian",
@@ -257,10 +256,12 @@ const LANGUAGE_NAMES = {
 
 let _storage = null;
 let _os = null;
+let _i18n = null;
 
 const settingsAtom = atom(DEFAULT_SETTINGS);
 const panelOpenAtom = atom(false);
 const historyAtom = atom([]); // Array<{ id, sourceText, detected, results: Array<{lang, text, engineUsed}>, time }>
+const localeBumpAtom = atom(0);
 
 function loadSettings(storage) {
   try {
@@ -323,14 +324,39 @@ function addHistoryEntry(entry) {
   }
 }
 
+function useT() {
+  useValue(localeBumpAtom);
+  const settings = useValue(settingsAtom);
+
+  return useCallback(
+    (key) => {
+      if (settings.uiLang === "ru") return LOCALES.ru[key] || LOCALES.en[key] || key;
+      if (settings.uiLang === "en") return LOCALES.en[key] || LOCALES.ru[key] || key;
+
+      if (_i18n && typeof _i18n.t === "function") {
+        try {
+          const val = _i18n.t(key);
+          if (val && val !== key) return val;
+        } catch {}
+      }
+
+      try {
+        const nav = (typeof navigator !== "undefined" && navigator.language ? navigator.language : "ru").toLowerCase();
+        if (nav.startsWith("ru") || nav.startsWith("be") || nav.startsWith("uk")) {
+          return LOCALES.ru[key] || LOCALES.en[key] || key;
+        }
+      } catch {}
+
+      return LOCALES.en[key] || LOCALES.ru[key] || key;
+    },
+    [settings.uiLang],
+  );
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    3. LANGUAGE HEURISTICS & TOKEN SHIELDING
    ══════════════════════════════════════════════════════════════════════════ */
 
-/**
- * Script & Cyrillic language detection with Russian priority for ambiguous Slavic words.
- * Prevents words like "правая" from falsely detecting as Belarusian (be) or Ukrainian (uk).
- */
 function detectScriptLanguage(text) {
   if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(text)) return "zh";
   if (/[\u3040-\u30ff]/.test(text)) return "ja";
@@ -347,12 +373,10 @@ function refineDetectedLanguage(text, rawDetected, targetLangs) {
   const normDetected = (rawDetected || "").toLowerCase().split("-")[0];
 
   if (/[а-яё]/i.test(text)) {
-    // Check for distinctive non-Russian Cyrillic characters
     const hasUk = /[іїєґ]/i.test(text);
     const hasBe = /[ў]/i.test(text);
     const hasSouthSlavic = /[ђјљњћџѓѕ]/i.test(text);
 
-    // If pure Russian Cyrillic without distinctive Ukrainian/Belarusian letters:
     if (!hasUk && !hasBe && !hasSouthSlavic) {
       if (["be", "uk", "bg", "mk", "sr"].includes(normDetected) || !normDetected) {
         return "ru";
@@ -514,21 +538,18 @@ async function translateWithMtFallback(text, to, signal) {
   const hit = memoryCache.get(key);
   if (hit !== undefined) return hit;
 
-  // Tier 1: Google gtx
   try {
     const entry = await fetchGoogle(text, to, "gtx", signal);
     rememberCache(key, entry);
     return entry;
   } catch (errGtx) {}
 
-  // Tier 2: Google dict-chrome-ex
   try {
     const entry = await fetchGoogle(text, to, "dict-chrome-ex", signal);
     rememberCache(key, entry);
     return entry;
   } catch (errDict) {}
 
-  // Tier 3: MyMemory API fallback
   try {
     const entry = await fetchMyMemory(text, to, signal);
     rememberCache(key, entry);
@@ -684,7 +705,6 @@ async function executeTranslate(input, signal) {
       .map((result) => (result.status === "fulfilled" ? result.value.detected : ""))
       .find(Boolean) || scriptGuess;
 
-  // Refine detected language to ensure Russian Cyrillic words aren't misclassified as Belarusian
   const detected = refineDetectedLanguage(rawText, rawDetected, targets);
 
   const results = settled.map((result, index) => {
@@ -879,7 +899,7 @@ function FormattedTranslation({ text, settings }) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   6. SELECTION POPUP HOST & COMPONENT
+   6. SELECTION POPUP HOST & STATUSBAR COMPONENT
    ══════════════════════════════════════════════════════════════════════════ */
 
 function isEditableElement(node) {
@@ -888,10 +908,10 @@ function isEditableElement(node) {
   return !!el.closest('textarea, input, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]');
 }
 
-function SelectionPopupHost() {
+function SelectionPopupHost({ ctx }) {
   const settings = useValue(settingsAtom);
   const panelOpen = useValue(panelOpenAtom);
-  const t = useTranslate();
+  const t = useT();
 
   const [view, setView] = useState(null);
   const [copied, setCopied] = useState(false);
@@ -980,7 +1000,6 @@ function SelectionPopupHost() {
 
   const readSelection = useCallback(() => {
     const currentCfg = settingsAtom.get();
-    // Quick toggle: do nothing if auto-popup is disabled
     if (currentCfg.autoPopup === false) return;
 
     const sel = window.getSelection();
@@ -1023,7 +1042,6 @@ function SelectionPopupHost() {
   useEffect(() => {
     ensurePopupStyles(settings);
 
-    // Left click only: button 0
     const onMouseUp = (e) => {
       if (e.button !== 0) return;
       if (rootRef.current && e.target instanceof Node && rootRef.current.contains(e.target)) return;
@@ -1031,7 +1049,6 @@ function SelectionPopupHost() {
       debounceTimerRef.current = setTimeout(readSelection, settingsAtom.get().debounceMs || 280);
     };
 
-    // Ignore right-click context menu triggers
     const onContextMenu = () => {
       clearTimeout(debounceTimerRef.current);
     };
@@ -1045,11 +1062,14 @@ function SelectionPopupHost() {
       if (e.key === "Escape") hide();
     };
 
-    // Scroll handling: DO NOT hide if user is scrolling inside sidebar or popup!
     const onScrollOrResize = (e) => {
       if (pinnedRef.current) return;
       if (e && e.target instanceof Element) {
-        if (e.target.closest?.(`.${POPUP_CLASS}`) || e.target.closest?.(".hermes-translate-panel")) {
+        if (
+          e.target.closest?.(`.${POPUP_CLASS}`) ||
+          e.target.closest?.(".hermes-translate-panel") ||
+          e.target.closest?.('[data-pane-id*="translate"]')
+        ) {
           return;
         }
       }
@@ -1075,130 +1095,168 @@ function SelectionPopupHost() {
     };
   }, [readSelection, hide, settings]);
 
-  if (!view) return null;
+  const enabled = settings.autoPopup !== false;
 
-  const bg = hexToRgba(settings.bgColor, settings.bgOpacity / 100);
-  const border = hexToRgba(settings.accentColor, 0.45);
-
-  const shellStyle = {
-    position: "fixed",
-    left: `${view.left}px`,
-    ...(view.bottom !== undefined ? { bottom: `${view.bottom}px` } : { top: `${view.top ?? 0}px` }),
-    zIndex: 2147483000,
-    maxWidth: `${settings.maxWidth || 560}px`,
-    maxHeight: `${settings.maxHeight || 420}px`,
-    overflowY: "auto",
-    boxSizing: "border-box",
-    minWidth: "220px",
-    padding: "8px 12px",
-    borderRadius: `${settings.borderRadius || 10}px`,
-    border: `1px solid ${border}`,
-    background: bg,
-    backdropFilter: "blur(12px)",
-    WebkitBackdropFilter: "blur(12px)",
-    color: settings.textColor,
-    font: `${settings.fontSize || 12.5}px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, system-ui, sans-serif`,
-    pointerEvents: "auto",
-    cursor: "default",
-  };
-
-  const langTagStyle = {
-    flex: "none",
-    fontSize: `${Math.max(9, (settings.fontSize || 12.5) - 2.5)}px`,
-    fontWeight: "700",
-    letterSpacing: "0.08em",
-    textTransform: "uppercase",
-    color: settings.accentColor,
-    minWidth: "24px",
-  };
-
-  const metaStyle = {
-    marginTop: "6px",
-    paddingTop: "5px",
-    borderTop: `1px solid ${hexToRgba(settings.accentColor, 0.18)}`,
-    fontSize: `${Math.max(9.5, (settings.fontSize || 12.5) - 2)}px`,
-    color: hexToRgba(settings.accentColor, 0.8),
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-  };
-
-  return h("div", {
-    ref: (el) => (rootRef.current = el),
-    className: POPUP_CLASS,
-    style: shellStyle,
-    onMouseDown: (e) => {
-      pinnedRef.current = true;
-      e.stopPropagation();
+  // Statusbar Chip Element
+  const chipNode = h("button", {
+    key: "chip",
+    className: "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] transition-colors hover:bg-[var(--chrome-action-hover,rgba(255,255,255,0.08))]",
+    style: {
+      background: "transparent",
+      border: "none",
+      cursor: "pointer",
+      color: enabled ? "var(--ui-accent)" : "var(--ui-text-tertiary)",
     },
-    onMouseEnter: () => (pinnedRef.current = true),
-    onMouseLeave: () => (pinnedRef.current = false),
+    title: `${t("autoPopup")}: ${enabled ? t("enabled") : t("disabled")}. ${t("statusChipTip")}`,
+    onClick: () => {
+      const next = !enabled;
+      patchSettings({ autoPopup: next });
+      host?.notify?.({
+        kind: "info",
+        message: `${t("autoPopup")}: ${next ? t("enabled") : t("disabled")}`,
+      });
+    },
   },
-    view.loading && h("div", {
-      className: "hermes-tr-row",
-      style: { color: settings.accentColor, gap: "8px" },
-    },
-      h(Loader, { className: "size-3", label: t("loading") }),
-      h("span", null, t("loading"))
-    ),
-
-    !view.loading && view.error && h("div", {
-      className: "hermes-tr-row",
-      style: { color: "#f0a35e", gap: "8px" },
-    },
-      h("span", { style: langTagStyle }, "!"),
-      h("span", null, `${t("failed")}: ${view.error}`)
-    ),
-
-    !view.loading && !view.error && (view.results || []).map((result, idx) => {
-      const badge = formatEngineBadge(result.engineUsed);
-      return h("div", {
-        key: idx,
-        className: "hermes-tr-row",
-        title: t("copy"),
-        onClick: () => {
-          if (!result.text) return;
-          writeClipboardText(result.text);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 2000);
-        },
-      },
-        h("div", {
-          style: {
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: "2px",
-          },
-        },
-          h("span", { style: langTagStyle }, result.lang),
-          h("span", {
-            className: `hermes-tr-badge hermes-tr-badge-${badge.tone}`,
-          }, badge.label)
-        ),
-        h("div", { style: { flex: 1, minWidth: 0 } },
-          result.error
-            ? h("span", { style: { color: "#f0a35e" } }, result.error)
-            : h(FormattedTranslation, { text: result.text, settings })
-        )
-      );
-    }),
-
-    h("div", { style: metaStyle },
-      h("span", null, copied ? t("copied") : `${t("copy")}${view.truncated ? ` · ${t("truncated")}` : ""}`),
-      h("button", {
-        className: "hermes-tr-btn-ghost",
-        onClick: () => {
-          const next = !panelOpenAtom.get();
-          panelOpenAtom.set(next);
-        },
-        title: panelOpen ? t("hidePanel") : t("openPanel"),
-      },
-        h(Codicon, { name: "layout-sidebar-right", size: 12 }),
-        panelOpen ? t("hidePanel") : t("openPanel")
-      )
+    h(Codicon, { name: enabled ? "globe" : "circle-outline", size: 12 }),
+    h("span", { style: { fontWeight: enabled ? 600 : 400 } },
+      enabled ? t("statusChipOn") : t("statusChipOff")
     )
   );
+
+  let popupNode = null;
+  if (view) {
+    const bg = hexToRgba(settings.bgColor, settings.bgOpacity / 100);
+    const border = hexToRgba(settings.accentColor, 0.45);
+
+    const shellStyle = {
+      position: "fixed",
+      left: `${view.left}px`,
+      ...(view.bottom !== undefined ? { bottom: `${view.bottom}px` } : { top: `${view.top ?? 0}px` }),
+      zIndex: 2147483000,
+      maxWidth: `${settings.maxWidth || 560}px`,
+      maxHeight: `${settings.maxHeight || 420}px`,
+      overflowY: "auto",
+      boxSizing: "border-box",
+      minWidth: "220px",
+      padding: "8px 12px",
+      borderRadius: `${settings.borderRadius || 10}px`,
+      border: `1px solid ${border}`,
+      background: bg,
+      backdropFilter: "blur(12px)",
+      WebkitBackdropFilter: "blur(12px)",
+      color: settings.textColor,
+      font: `${settings.fontSize || 12.5}px/1.45 ui-sans-serif, -apple-system, BlinkMacSystemFont, system-ui, sans-serif`,
+      pointerEvents: "auto",
+      cursor: "default",
+    };
+
+    const langTagStyle = {
+      flex: "none",
+      fontSize: `${Math.max(9, (settings.fontSize || 12.5) - 2.5)}px`,
+      fontWeight: "700",
+      letterSpacing: "0.08em",
+      textTransform: "uppercase",
+      color: settings.accentColor,
+      minWidth: "24px",
+    };
+
+    const metaStyle = {
+      marginTop: "6px",
+      paddingTop: "5px",
+      borderTop: `1px solid ${hexToRgba(settings.accentColor, 0.18)}`,
+      fontSize: `${Math.max(9.5, (settings.fontSize || 12.5) - 2)}px`,
+      color: hexToRgba(settings.accentColor, 0.8),
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+    };
+
+    popupNode = h("div", {
+      key: "popup",
+      ref: (el) => (rootRef.current = el),
+      className: POPUP_CLASS,
+      style: shellStyle,
+      onMouseDown: (e) => {
+        pinnedRef.current = true;
+        e.stopPropagation();
+      },
+      onMouseEnter: () => (pinnedRef.current = true),
+      onMouseLeave: () => (pinnedRef.current = false),
+    },
+      view.loading && h("div", {
+        className: "hermes-tr-row",
+        style: { color: settings.accentColor, gap: "8px" },
+      },
+        h(Loader, { className: "size-3", label: t("loading") }),
+        h("span", null, t("loading"))
+      ),
+
+      !view.loading && view.error && h("div", {
+        className: "hermes-tr-row",
+        style: { color: "#f0a35e", gap: "8px" },
+      },
+        h("span", { style: langTagStyle }, "!"),
+        h("span", null, `${t("failed")}: ${view.error}`)
+      ),
+
+      !view.loading && !view.error && (view.results || []).map((result, idx) => {
+        const badge = formatEngineBadge(result.engineUsed);
+        return h("div", {
+          key: idx,
+          className: "hermes-tr-row",
+          title: t("copy"),
+          onClick: () => {
+            if (!result.text) return;
+            writeClipboardText(result.text);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          },
+        },
+          h("div", {
+            style: {
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "2px",
+            },
+          },
+            h("span", { style: langTagStyle }, result.lang),
+            h("span", {
+              className: `hermes-tr-badge hermes-tr-badge-${badge.tone}`,
+            }, badge.label)
+          ),
+          h("div", { style: { flex: 1, minWidth: 0 } },
+            result.error
+              ? h("span", { style: { color: "#f0a35e" } }, result.error)
+              : h(FormattedTranslation, { text: result.text, settings })
+          )
+        );
+      }),
+
+      h("div", { style: metaStyle },
+        h("span", null, copied ? t("copied") : `${t("copy")}${view.truncated ? ` · ${t("truncated")}` : ""}`),
+        h("button", {
+          className: "hermes-tr-btn-ghost",
+          onClick: (e) => {
+            e.stopPropagation();
+            const next = !panelOpenAtom.get();
+            panelOpenAtom.set(next);
+            if (ctx && typeof ctx.runAction === "function") {
+              try {
+                ctx.runAction("view.toggleRightSidebar");
+              } catch {}
+            }
+          },
+          title: panelOpen ? t("hidePanel") : t("openPanel"),
+        },
+          h(Codicon, { name: "layout-sidebar-right", size: 12 }),
+          panelOpen ? t("hidePanel") : t("openPanel")
+        )
+      )
+    );
+  }
+
+  return h(React.Fragment, null, popupNode, chipNode);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1208,24 +1266,23 @@ function SelectionPopupHost() {
 function TranslationPane({ ctx }) {
   const settings = useValue(settingsAtom);
   const history = useValue(historyAtom);
-  const t = useTranslate();
+  const t = useT();
 
   const [inputText, setInputText] = useState("");
   const [translating, setTranslating] = useState(false);
   const [copiedId, setCopiedId] = useState("");
   const [showSettings, setShowSettings] = useState(false);
 
-  // Settings form draft state
   const [targetDraft, setTargetDraft] = useState(settings.targets);
   const [modeDraft, setModeDraft] = useState(settings.engineMode);
   const [themeDraft, setThemeDraft] = useState(settings.themePreset || "amber");
+  const [uiLangDraft, setUiLangDraft] = useState(settings.uiLang || "auto");
   const [debounceDraft, setDebounceDraft] = useState(String(settings.debounceMs || 280));
   const [historyModeDraft, setHistoryModeDraft] = useState(settings.historyMode || "all");
   const [autoPopupDraft, setAutoPopupDraft] = useState(settings.autoPopup !== false);
 
   const historyListRef = useRef(null);
 
-  // Auto-scroll to top when a new translation card arrives
   useEffect(() => {
     if (historyListRef.current) {
       historyListRef.current.scrollTo({ top: 0, behavior: "smooth" });
@@ -1329,7 +1386,7 @@ function TranslationPane({ ctx }) {
             host?.notify?.({ kind: "info", message: `${t("autoPopup")}: ${next ? t("enabled") : t("disabled")}` });
           },
         },
-          h(Codicon, { name: settings.autoPopup ? "check" : "circle-slash", size: 11 }),
+          h(Codicon, { name: settings.autoPopup ? "check" : "circle-outline", size: 11 }),
           settings.autoPopup ? "Авто" : "Пауза"
         )
       ),
@@ -1394,7 +1451,7 @@ function TranslationPane({ ctx }) {
         )
       ),
 
-      // History Mode (Item 9)
+      // History Mode
       h("div", { className: "space-y-1" },
         h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("historyMode")),
         h(Select, {
@@ -1408,6 +1465,24 @@ function TranslationPane({ ctx }) {
             h(SelectItem, { value: "all" }, t("historyAll")),
             h(SelectItem, { value: "latest" }, t("historyLatest")),
             h(SelectItem, { value: "off" }, t("historyOff"))
+          )
+        )
+      ),
+
+      // Interface Language
+      h("div", { className: "space-y-1" },
+        h("label", { className: "font-medium text-[var(--ui-text-secondary)]" }, t("uiLang")),
+        h(Select, {
+          value: uiLangDraft,
+          onValueChange: (v) => setUiLangDraft(v),
+        },
+          h(SelectTrigger, { className: "h-7 text-xs w-full" },
+            h(SelectValue, { placeholder: t("uiLang") })
+          ),
+          h(SelectContent, null,
+            h(SelectItem, { value: "auto" }, t("uiLangAuto")),
+            h(SelectItem, { value: "ru" }, t("uiLangRu")),
+            h(SelectItem, { value: "en" }, t("uiLangEn"))
           )
         )
       ),
@@ -1468,6 +1543,7 @@ function TranslationPane({ ctx }) {
               targets: targetDraft,
               engineMode: modeDraft,
               historyMode: historyModeDraft,
+              uiLang: uiLangDraft,
               debounceMs: parseInt(debounceDraft, 10) || 280,
               autoPopup: autoPopupDraft,
             });
@@ -1512,7 +1588,7 @@ function TranslationPane({ ctx }) {
 
     h(Separator, null),
 
-    // 4. History Feed (with auto-scroll ref and high-contrast card styling)
+    // 4. History Feed
     h("div", {
       ref: historyListRef,
       className: "flex-1 min-h-0 overflow-y-auto space-y-3 pr-1",
@@ -1564,7 +1640,7 @@ function TranslationPane({ ctx }) {
                 }, item.sourceText)
               ),
 
-              // Target Translations (Hero element)
+              // Target Translations
               h("div", { className: "space-y-2 pt-1" },
                 item.results.map((r, rIdx) => {
                   const badge = formatEngineBadge(r.engineUsed);
@@ -1600,41 +1676,7 @@ function TranslationPane({ ctx }) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   8. STATUS BAR INTERACTIVE CHIP (Item 10)
-   ══════════════════════════════════════════════════════════════════════════ */
-
-function TranslationStatusChip({ ctx }) {
-  const settings = useValue(settingsAtom);
-  const t = useTranslate();
-  const enabled = settings.autoPopup !== false;
-
-  return h("button", {
-    className: "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] transition-colors hover:bg-[var(--chrome-action-hover,rgba(255,255,255,0.08))]",
-    style: {
-      background: "transparent",
-      border: "none",
-      cursor: "pointer",
-      color: enabled ? "var(--ui-accent)" : "var(--ui-text-tertiary)",
-    },
-    title: `${t("autoPopup")}: ${enabled ? t("enabled") : t("disabled")}. ${t("statusChipTip")}`,
-    onClick: () => {
-      const next = !enabled;
-      patchSettings({ autoPopup: next });
-      host?.notify?.({
-        kind: "info",
-        message: `${t("autoPopup")}: ${next ? t("enabled") : t("disabled")}`,
-      });
-    },
-  },
-    h(Codicon, { name: enabled ? "globe" : "circle-slash", size: 12 }),
-    h("span", { style: { fontWeight: enabled ? 600 : 400 } },
-      enabled ? t("statusChipOn") : t("statusChipOff")
-    )
-  );
-}
-
-/* ══════════════════════════════════════════════════════════════════════════
-   9. HOTKEYS & COMMAND PALETTE HANDLERS
+   8. HOTKEYS & COMMAND PALETTE HANDLERS
    ══════════════════════════════════════════════════════════════════════════ */
 
 async function translateClipboard() {
@@ -1772,7 +1814,7 @@ function setupGlobalHotkeys() {
       return;
     }
 
-    // Alt+Shift+O: Quick toggle auto-popup on selection (Item 10)
+    // Alt+Shift+O: Quick toggle auto-popup on selection
     if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyO") {
       e.preventDefault();
       const current = settingsAtom.get();
@@ -1791,7 +1833,7 @@ function setupGlobalHotkeys() {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   10. PLUGIN LIFECYCLE & REGISTRATION
+   9. PLUGIN LIFECYCLE & REGISTRATION
    ══════════════════════════════════════════════════════════════════════════ */
 
 export default {
@@ -1801,46 +1843,42 @@ export default {
   register(ctx) {
     _storage = ctx.storage;
     _os = ctx.os || null;
+    _i18n = ctx.i18n || null;
 
-    // 1. Register reactive i18n locales
     if (ctx.i18n && typeof ctx.i18n.register === "function") {
-      ctx.i18n.register(LOCALES);
+      try {
+        ctx.i18n.register(LOCALES);
+      } catch {}
     }
 
-    // 2. Load persisted settings
+    if (ctx.i18n && typeof ctx.i18n.onLocaleChange === "function") {
+      try {
+        ctx.i18n.onLocaleChange(() => {
+          localeBumpAtom.set(localeBumpAtom.get() + 1);
+        });
+      } catch {}
+    }
+
     const initialSettings = loadSettings(ctx.storage);
     settingsAtom.set(initialSettings);
 
-    // 3. Register global SelectionPopupHost via statusbar right
+    // 1. Single combined contribution for popup host + status bar chip
     ctx.register({
       id: "selection-popup-host",
       area: STATUSBAR_AREAS.right,
-      render: () => h(SelectionPopupHost, null),
+      render: () => h(SelectionPopupHost, { ctx }),
     });
 
-    // 4. Register interactive status bar toggle chip (Item 10)
-    ctx.register({
-      id: "chip",
-      area: STATUSBAR_AREAS.right,
-      order: 100,
-      render: () => h(TranslationStatusChip, { ctx }),
-    });
-
-    // 5. Register persistent Layout Pane (right rail sidebar)
+    // 2. Right rail sidebar layout pane (standard placement)
     ctx.register({
       id: "pane",
       area: PANES_AREA,
       title: "Перевод",
-      data: {
-        placement: "right",
-        width: "340px",
-        collapsible: true,
-        tabTitleText: () => (ctx.i18n?.t ? ctx.i18n.t("panelTitle") : "Перевод"),
-      },
+      data: { placement: "right", width: "340px" },
       render: () => h(TranslationPane, { ctx }),
     });
 
-    // 6. Register Palette Commands
+    // 3. Register Palette Commands
     ctx.register({
       id: "palette.translate-clipboard",
       area: PALETTE_AREA,
@@ -1893,10 +1931,8 @@ export default {
       },
     });
 
-    // 7. Setup global hotkeys listener
     const removeHotkeys = setupGlobalHotkeys();
 
-    // 8. Cleanup on dispose
     ctx.onDispose(() => {
       removeHotkeys();
       const styleEl = document.getElementById("hermes-translate-selection-styles");
