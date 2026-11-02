@@ -37,7 +37,7 @@ function getSandbox() {
       unshieldTokens,
       isComplexFormattedText,
       cleanLlmOutput,
-      formatEngineBadge,
+      formatShortBadge,
       DEFAULT_SETTINGS,
       THEME_PRESETS,
       LOCALES
@@ -79,13 +79,13 @@ test("refineDetectedLanguage prioritizes Russian over false Belarusian/Ukrainian
   );
 });
 
-test("formatEngineBadge returns clean badge labels and tones", () => {
-  assert.deepEqual(sandbox.formatEngineBadge("gtx"), { label: "Google MT", tone: "google" });
-  assert.deepEqual(sandbox.formatEngineBadge("google-gtx"), { label: "Google MT", tone: "google" });
-  assert.deepEqual(sandbox.formatEngineBadge("dict-chrome-ex"), { label: "Google Dict", tone: "dict" });
-  assert.deepEqual(sandbox.formatEngineBadge("google-dict"), { label: "Google Dict", tone: "dict" });
-  assert.deepEqual(sandbox.formatEngineBadge("llm"), { label: "Hermes LLM", tone: "llm" });
-  assert.deepEqual(sandbox.formatEngineBadge("mymemory"), { label: "MyMemory", tone: "mymemory" });
+test("formatShortBadge returns clean short badges (GGL, MYM, LLM)", () => {
+  assert.deepEqual(sandbox.formatShortBadge("gtx"), { label: "GGL", tone: "google" });
+  assert.deepEqual(sandbox.formatShortBadge("google-gtx"), { label: "GGL", tone: "google" });
+  assert.deepEqual(sandbox.formatShortBadge("dict-chrome-ex"), { label: "GGL", tone: "google" });
+  assert.deepEqual(sandbox.formatShortBadge("google-dict"), { label: "GGL", tone: "google" });
+  assert.deepEqual(sandbox.formatShortBadge("llm"), { label: "LLM", tone: "llm" });
+  assert.deepEqual(sandbox.formatShortBadge("mymemory"), { label: "MYM", tone: "mymemory" });
 });
 
 test("targetLangName resolves localized language names", () => {
