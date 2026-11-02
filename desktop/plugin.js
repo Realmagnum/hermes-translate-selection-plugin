@@ -7,9 +7,13 @@
  * - Complex/structured/code text -> Session LLM via native gateway `llm.oneshot`
  * - Automatic fail-safe fallback to Token-Shielded MT if LLM times out or errors
  *
- * Fully self-contained ECMAScript Module (ESM) compatible with all Hermes Desktop versions.
- * Employs a dedicated floating companion panel (as proven by BrokeSkill/Hermes-Insight)
- * to ensure conflict-free coexistence with core Files/Review layout panes.
+ * Tiled Workspace Architecture:
+ * - Docks cleanly to the RIGHT of the conversation workspace via host.openWorkspace
+ * - Splits the layout side-by-side: NEVER overlaps or hides the active chat/messages
+ * - Independent tab with title, close [X], drag & drop, without collision with Files
+ * - Mode badge in sidebar cycles AUTO ⇄ GOOGLE MT ⇄ MYMEMORY ⇄ LLM ONLY on click
+ *
+ * Fully self-contained ECMAScript Module (ESM) compatible with Hermes Desktop plugin loader.
  *
  * @module hermes-translate-selection-plugin
  * @author Realmagnum
@@ -52,10 +56,11 @@ const PLUGIN_ID = "translate-selection";
 const PLUGIN_NAME = "Translate Selection";
 const STORAGE_KEY = "translate-selection.v1";
 const POPUP_CLASS = "hermes-translate-popup";
+const WORKSPACE_TAB_ID = "translate-selection:tile";
 
 const DEFAULT_SETTINGS = {
   autoPopup: true,           // Quick toggle for mouse selection popup
-  engineMode: "auto",        // 'auto' | 'fast' | 'llm'
+  engineMode: "auto",        // 'auto' | 'google' | 'mymemory' | 'llm'
   targets: "ru, en",         // Target languages
   debounceMs: 280,           // Debounce delay to prevent premature triggers
   historyMode: "all",        // 'all' | 'latest' | 'off'
@@ -147,7 +152,8 @@ const LOCALES = {
     selectedLangs: "Active:",
     engineMode: "Engine mode",
     modeAuto: "Auto (Smart Hybrid)",
-    modeFast: "Fast MT Only (no LLM)",
+    modeGoogle: "Google MT Only",
+    modeMyMemory: "MyMemory Only",
     modeLlm: "Session LLM Only",
     theme: "Color theme",
     debounceMs: "Selection debounce delay",
@@ -195,7 +201,8 @@ const LOCALES = {
     selectedLangs: "Выбрано:",
     engineMode: "Режим перевода",
     modeAuto: "Auto (Smart Hybrid)",
-    modeFast: "Fast MT Only (без LLM)",
+    modeGoogle: "Только Google MT",
+    modeMyMemory: "Только MyMemory",
     modeLlm: "Session LLM Only",
     theme: "Цветовая тема",
     debounceMs: "Задержка выделения",
@@ -257,6 +264,7 @@ const LANGUAGE_NAMES = {
 let _storage = null;
 let _os = null;
 let _i18n = null;
+let _workspaceCloser = null;
 
 const settingsAtom = atom(DEFAULT_SETTINGS);
 const panelOpenAtom = atom(false);
@@ -549,10 +557,18 @@ async function fetchMyMemory(text, to, signal) {
   return { text: unescapeHtml(translated.trim()), detected, engineUsed: "mymemory" };
 }
 
-async function translateWithMtFallback(text, to, signal) {
-  const key = `mt\0${to}\0${text}`;
+async function translateWithMtFallback(text, to, signal, forcedEngine) {
+  const key = `mt\0${forcedEngine || "auto"}\0${to}\0${text}`;
   const hit = memoryCache.get(key);
   if (hit !== undefined) return hit;
+
+  // If user selected "MyMemory Only"
+  if (forcedEngine === "mymemory") {
+    const entry = await fetchMyMemory(text, to, signal);
+    entry.engineUsed = "mymemory";
+    rememberCache(key, entry);
+    return entry;
+  }
 
   // Tier 1: Google gtx (Google MT)
   try {
@@ -714,7 +730,9 @@ async function executeTranslate(input, signal) {
   const { shielded, tokens } = shieldTokens(rawText);
 
   const settled = await Promise.allSettled(
-    targetsToTranslate.map((lang) => translateWithMtFallback(shielded, lang, signal)),
+    targetsToTranslate.map((lang) =>
+      translateWithMtFallback(shielded, lang, signal, mode === "mymemory" ? "mymemory" : mode === "google" ? "google" : undefined)
+    ),
   );
 
   const rawDetected =
@@ -730,7 +748,12 @@ async function executeTranslate(input, signal) {
       const unshielded = unshieldTokens(result.value.text, tokens);
       return { lang, text: unshielded, engineUsed: result.value.engineUsed };
     }
-    return { lang, text: "", engineUsed: "google-gtx", error: result.reason?.message || "Translation failed" };
+    return {
+      lang,
+      text: "",
+      engineUsed: mode === "mymemory" ? "mymemory" : "google-gtx",
+      error: result.reason?.message || "Translation failed",
+    };
   });
 
   const useful = dropSource
@@ -930,6 +953,66 @@ function isEditableElement(node) {
   return !!el.closest('textarea, input, [contenteditable=""], [contenteditable="true"], [contenteditable="plaintext-only"]');
 }
 
+/** Tiled companion panel open/close via host.openWorkspace */
+function openTiledTranslationPanel(ctx) {
+  panelOpenAtom.set(true);
+
+  if (typeof host?.openWorkspace === "function") {
+    // If tab already exists, reveal it
+    const paneId = `plugin-workspace:${WORKSPACE_TAB_ID}`;
+    if (typeof host?.revealPane === "function") {
+      try {
+        host.revealPane(paneId);
+        return;
+      } catch {}
+    }
+
+    try {
+      if (_workspaceCloser) {
+        _workspaceCloser();
+        _workspaceCloser = null;
+      }
+
+      _workspaceCloser = host.openWorkspace(WORKSPACE_TAB_ID, {
+        title: "Перевод",
+        minWidth: "22rem",
+        dock: {
+          pane: "workspace",
+          pos: "right",
+        },
+        render: () => h(TranslationPane, { ctx, onClose: closeTiledTranslationPanel }),
+        onClose: () => {
+          _workspaceCloser = null;
+          panelOpenAtom.set(false);
+        },
+      });
+      return;
+    } catch (err) {
+      console.warn("[translate] openWorkspace fallback:", err);
+    }
+  }
+
+  // Fallback: panelOpenAtom state
+}
+
+function closeTiledTranslationPanel() {
+  panelOpenAtom.set(false);
+  if (_workspaceCloser) {
+    try {
+      _workspaceCloser();
+    } catch {}
+    _workspaceCloser = null;
+  }
+}
+
+function toggleTiledTranslationPanel(ctx) {
+  if (panelOpenAtom.get()) {
+    closeTiledTranslationPanel();
+  } else {
+    openTiledTranslationPanel(ctx);
+  }
+}
+
 function SelectionPopupHost({ ctx }) {
   const settings = useValue(settingsAtom);
   const panelOpen = useValue(panelOpenAtom);
@@ -951,10 +1034,6 @@ function SelectionPopupHost({ ctx }) {
     pinnedRef.current = false;
     setCopied(false);
     setView(null);
-  }, []);
-
-  const toggleTranslatePanel = useCallback(() => {
-    panelOpenAtom.set(!panelOpenAtom.get());
   }, []);
 
   const runTranslation = useCallback(
@@ -1091,7 +1170,6 @@ function SelectionPopupHost({ ctx }) {
     const onKeyDown = (e) => {
       if (e.key === "Escape") {
         hide();
-        if (panelOpenAtom.get()) panelOpenAtom.set(false);
       }
     };
 
@@ -1100,7 +1178,8 @@ function SelectionPopupHost({ ctx }) {
       if (e && e.target instanceof Element) {
         if (
           e.target.closest?.(`.${POPUP_CLASS}`) ||
-          e.target.closest?.(".hermes-translate-panel")
+          e.target.closest?.(".hermes-translate-panel") ||
+          e.target.closest?.('[data-pane-id*="translate"]')
         ) {
           return;
         }
@@ -1132,7 +1211,7 @@ function SelectionPopupHost({ ctx }) {
   // Status Bar Chip (Item 3 & Item 10)
   const chipNode = h("button", {
     key: "chip",
-    className: "inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[11px] transition-colors hover:bg-[var(--chrome-action-hover,rgba(255,255,255,0.08))]",
+    className: "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] transition-colors hover:bg-[var(--chrome-action-hover,rgba(255,255,255,0.08))]",
     style: {
       background: "transparent",
       border: "none",
@@ -1144,10 +1223,10 @@ function SelectionPopupHost({ ctx }) {
       const next = !enabled;
       patchSettings({ autoPopup: next });
       if (next) {
-        panelOpenAtom.set(true);
+        openTiledTranslationPanel(ctx);
         host?.notify?.({ kind: "info", message: `${t("panelTitle")}: ${t("enabled")}` });
       } else {
-        panelOpenAtom.set(false);
+        closeTiledTranslationPanel();
         host?.notify?.({ kind: "info", message: `${t("panelTitle")}: ${t("disabled")}` });
       }
     },
@@ -1275,7 +1354,7 @@ function SelectionPopupHost({ ctx }) {
           className: "hermes-tr-btn-ghost",
           onClick: (e) => {
             e.stopPropagation();
-            toggleTranslatePanel();
+            toggleTiledTranslationPanel(ctx);
           },
           title: panelOpen ? t("hidePanel") : t("openPanel"),
         },
@@ -1286,23 +1365,14 @@ function SelectionPopupHost({ ctx }) {
     );
   }
 
-  // Floating Side Panel (BrokeSkill/Hermes-Insight architecture: zero conflict with Files)
-  const panelNode = panelOpen
-    ? h(FloatingTranslationPanel, {
-        key: "floating-panel",
-        ctx,
-        onClose: () => panelOpenAtom.set(false),
-      })
-    : null;
-
-  return h(React.Fragment, null, popupNode, panelNode, chipNode);
+  return h(React.Fragment, null, popupNode, chipNode);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
-   7. COMPANION TRANSLATION PANEL (FLOATING RIGHT PANEL)
+   7. TRANSLATION PANE CONTENT (Tiled Workspace Component)
    ══════════════════════════════════════════════════════════════════════════ */
 
-function FloatingTranslationPanel({ ctx, onClose }) {
+function TranslationPane({ ctx, onClose }) {
   const settings = useValue(settingsAtom);
   const history = useValue(historyAtom);
   const t = useT();
@@ -1389,39 +1459,19 @@ function FloatingTranslationPanel({ ctx, onClose }) {
     setTimeout(() => setCopiedId(""), 2000);
   };
 
-  const panelStyle = {
-    position: "fixed",
-    right: 12,
-    top: 56,
-    bottom: 36,
-    width: 340,
-    maxWidth: "calc(100vw - 24px)",
-    zIndex: 120,
-    display: "flex",
-    flexDirection: "column",
-    minHeight: 0,
-    background: hexToRgba(settings.bgColor, settings.bgOpacity / 100),
-    color: settings.textColor,
-    border: `1px solid ${hexToRgba(settings.accentColor, 0.45)}`,
-    borderRadius: `${settings.borderRadius || 10}px`,
-    boxShadow: "0 12px 36px -8px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.25)",
-    fontFamily: "var(--font-sans, inherit)",
-    fontSize: "var(--conversation-text-font-size, 0.8125rem)",
-    backdropFilter: "blur(14px)",
-    WebkitBackdropFilter: "blur(14px)",
-    overflow: "hidden",
-  };
-
   const activeLangsDescription = useMemo(() => {
-    const list = targetDraft.split(/[,;\s]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+    const list = targetDraft.split(/[,;\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
     if (!list.length) return "None";
-    return list.map(c => targetLangName(c)).join(", ");
+    return list.map((c) => targetLangName(c)).join(", ");
   }, [targetDraft]);
 
   return h("div", {
-    className: "hermes-translate-panel p-3 space-y-3",
-    style: panelStyle,
-    onMouseDown: (e) => e.stopPropagation(),
+    className: "hermes-translate-panel flex flex-col h-full overflow-hidden p-3 space-y-3",
+    style: {
+      color: "var(--ui-text-primary)",
+      fontFamily: "var(--font-sans, inherit)",
+      fontSize: "0.8125rem",
+    },
   },
     // 1. Header Toolbar: Globe, Mode Pill Switcher, Auto/Pause toggle, Settings, Clear, Close [X]
     h("div", {
@@ -1436,19 +1486,40 @@ function FloatingTranslationPanel({ ctx, onClose }) {
           title: t("panelTitle"),
         }, t("panelTitle")),
 
-        // Interactive Mode Switcher Pill (Item 3: clicks directly toggle Auto ⇄ Fast MT ⇄ LLM)
+        // Interactive Mode Switcher Pill (Cycles: AUTO ⇄ GOOGLE MT ⇄ MYMEMORY ⇄ LLM ONLY)
         h("button", {
           type: "button",
           className: "shrink-0 flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full border transition-all cursor-pointer font-bold uppercase",
           style: {
-            background: settings.engineMode === "llm" ? "rgba(234, 179, 8, 0.16)" : settings.engineMode === "fast" ? "rgba(59, 130, 246, 0.16)" : "rgba(34, 197, 94, 0.16)",
-            borderColor: settings.engineMode === "llm" ? "rgba(234, 179, 8, 0.45)" : settings.engineMode === "fast" ? "rgba(59, 130, 246, 0.45)" : "rgba(34, 197, 94, 0.45)",
-            color: settings.engineMode === "llm" ? "#facc15" : settings.engineMode === "fast" ? "#60a5fa" : "#4ade80",
+            background:
+              settings.engineMode === "llm"
+                ? "rgba(234, 179, 8, 0.16)"
+                : settings.engineMode === "mymemory"
+                ? "rgba(168, 85, 247, 0.16)"
+                : settings.engineMode === "google"
+                ? "rgba(59, 130, 246, 0.16)"
+                : "rgba(34, 197, 94, 0.16)",
+            borderColor:
+              settings.engineMode === "llm"
+                ? "rgba(234, 179, 8, 0.45)"
+                : settings.engineMode === "mymemory"
+                ? "rgba(168, 85, 247, 0.45)"
+                : settings.engineMode === "google"
+                ? "rgba(59, 130, 246, 0.45)"
+                : "rgba(34, 197, 94, 0.45)",
+            color:
+              settings.engineMode === "llm"
+                ? "#facc15"
+                : settings.engineMode === "mymemory"
+                ? "#c084fc"
+                : settings.engineMode === "google"
+                ? "#60a5fa"
+                : "#4ade80",
           },
-          title: "Клик: быстро переключить режим (Auto ⇄ Fast MT ⇄ LLM)",
+          title: "Клик: быстро переключить режим (Auto ⇄ Google MT ⇄ MyMemory ⇄ LLM)",
           onClick: (e) => {
             e.stopPropagation();
-            const modes = ["auto", "fast", "llm"];
+            const modes = ["auto", "google", "mymemory", "llm"];
             const nextIdx = (modes.indexOf(settings.engineMode) + 1) % modes.length;
             const next = modes[nextIdx];
             patchSettings({ engineMode: next });
@@ -1460,10 +1531,23 @@ function FloatingTranslationPanel({ ctx, onClose }) {
           },
         },
           h(Codicon, {
-            name: settings.engineMode === "llm" ? "sparkle" : settings.engineMode === "fast" ? "zap" : "sync",
+            name:
+              settings.engineMode === "llm"
+                ? "sparkle"
+                : settings.engineMode === "mymemory"
+                ? "bookmark"
+                : settings.engineMode === "google"
+                ? "zap"
+                : "sync",
             size: 11,
           }),
-          settings.engineMode === "fast" ? "FAST MT" : settings.engineMode === "llm" ? "LLM ONLY" : "AUTO"
+          settings.engineMode === "google"
+            ? "GOOGLE MT"
+            : settings.engineMode === "mymemory"
+            ? "MYMEMORY"
+            : settings.engineMode === "llm"
+            ? "LLM ONLY"
+            : "AUTO"
         ),
 
         // Auto-popup quick toggle
@@ -1509,14 +1593,14 @@ function FloatingTranslationPanel({ ctx, onClose }) {
           variant: "ghost",
           className: "size-6 p-0 hover:bg-[var(--chrome-action-hover)]",
           title: t("closePanel"),
-          onClick: onClose,
+          onClick: onClose || closeTiledTranslationPanel,
         }, h(Codicon, { name: "close", size: 14 }))
       )
     ),
 
     // 2. Settings Collapsible Section
     showSettings && h("div", {
-      className: "p-3 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-2.5 text-xs overflow-y-auto max-h-[60vh]",
+      className: "p-3 rounded-lg border border-[var(--ui-stroke-secondary)] bg-[var(--muted)] space-y-2.5 text-xs overflow-y-auto max-h-[50vh]",
     },
       // Target languages with ISO link & quick chips
       h("div", { className: "space-y-1.5" },
@@ -1584,7 +1668,8 @@ function FloatingTranslationPanel({ ctx, onClose }) {
           ),
           h(SelectContent, null,
             h(SelectItem, { value: "auto" }, t("modeAuto")),
-            h(SelectItem, { value: "fast" }, t("modeFast")),
+            h(SelectItem, { value: "google" }, t("modeGoogle")),
+            h(SelectItem, { value: "mymemory" }, t("modeMyMemory")),
             h(SelectItem, { value: "llm" }, t("modeLlm"))
           )
         )
@@ -1838,7 +1923,7 @@ function FloatingTranslationPanel({ ctx, onClose }) {
    8. HOTKEYS & COMMAND PALETTE HANDLERS
    ══════════════════════════════════════════════════════════════════════════ */
 
-async function translateClipboard() {
+async function translateClipboard(ctx) {
   let clipText = "";
   try {
     if (navigator?.clipboard?.readText) {
@@ -1849,7 +1934,7 @@ async function translateClipboard() {
   const text = (clipText || "").trim();
   if (!text) {
     host?.notify?.({ kind: "info", message: "Буфер обмена пуст. Открываю панель перевода…" });
-    panelOpenAtom.set(true);
+    openTiledTranslationPanel(ctx);
     return;
   }
 
@@ -1899,7 +1984,7 @@ async function translateClipboard() {
   }
 }
 
-async function translateLastAssistantMessage() {
+async function translateLastAssistantMessage(ctx) {
   const assistantEls = document.querySelectorAll('[data-role="assistant"], .assistant-message, .prose');
   let targetText = "";
 
@@ -1948,7 +2033,7 @@ async function translateLastAssistantMessage() {
         detected: output.detected,
         results: output.results,
       });
-      panelOpenAtom.set(true);
+      openTiledTranslationPanel(ctx);
       host?.notify?.({ kind: "success", message: "✓ Ответ ассистента переведён в панели" });
     }
   } catch (err) {
@@ -1956,26 +2041,26 @@ async function translateLastAssistantMessage() {
   }
 }
 
-function setupGlobalHotkeys() {
+function setupGlobalHotkeys(ctx) {
   const onKeyDown = (e) => {
     // Alt+T: Translate clipboard
     if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyT") {
       e.preventDefault();
-      translateClipboard();
+      translateClipboard(ctx);
       return;
     }
 
     // Alt+Shift+T: Translate last assistant message
     if (e.altKey && e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyT") {
       e.preventDefault();
-      translateLastAssistantMessage();
+      translateLastAssistantMessage(ctx);
       return;
     }
 
-    // Alt+P: Toggle persistent translation sidebar panel
+    // Alt+P: Toggle tiled translation sidebar panel
     if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey && e.code === "KeyP") {
       e.preventDefault();
-      panelOpenAtom.set(!panelOpenAtom.get());
+      toggleTiledTranslationPanel(ctx);
       return;
     }
 
@@ -1985,8 +2070,8 @@ function setupGlobalHotkeys() {
       const current = settingsAtom.get();
       const next = current.autoPopup === false;
       patchSettings({ autoPopup: next });
-      if (next) panelOpenAtom.set(true);
-      else panelOpenAtom.set(false);
+      if (next) openTiledTranslationPanel(ctx);
+      else closeTiledTranslationPanel();
       host?.notify?.({
         kind: "info",
         message: `Перевод при выделении: ${next ? "Включен" : "Выключен"}`,
@@ -2029,7 +2114,7 @@ export default {
     const initialSettings = loadSettings(ctx.storage);
     settingsAtom.set(initialSettings);
 
-    // 1. Single combined contribution for popup host, floating panel, and status bar chip
+    // 1. Single combined contribution for popup host and status bar chip
     ctx.register({
       id: "selection-popup-host",
       area: STATUSBAR_AREAS.right,
@@ -2044,7 +2129,7 @@ export default {
         id: "translate.clipboard",
         label: "Translate: Перевести буфер обмена (Alt+T)",
         keywords: ["translate", "clipboard", "буфер", "перевод"],
-        run: () => translateClipboard(),
+        run: () => translateClipboard(ctx),
       },
     });
 
@@ -2055,7 +2140,7 @@ export default {
         id: "translate.last",
         label: "Translate: Перевести последний ответ ассистента (Alt+Shift+T)",
         keywords: ["translate", "last", "assistant", "ответ"],
-        run: () => translateLastAssistantMessage(),
+        run: () => translateLastAssistantMessage(ctx),
       },
     });
 
@@ -2066,7 +2151,7 @@ export default {
         id: "translate.panel",
         label: "Translate: Открыть / закрыть панель перевода (Alt+P)",
         keywords: ["translate", "panel", "sidebar", "боковая", "панель"],
-        run: () => panelOpenAtom.set(!panelOpenAtom.get()),
+        run: () => toggleTiledTranslationPanel(ctx),
       },
     });
 
@@ -2081,8 +2166,8 @@ export default {
           const current = settingsAtom.get();
           const next = current.autoPopup === false;
           patchSettings({ autoPopup: next });
-          if (next) panelOpenAtom.set(true);
-          else panelOpenAtom.set(false);
+          if (next) openTiledTranslationPanel(ctx);
+          else closeTiledTranslationPanel();
           host?.notify?.({
             kind: "info",
             message: `Перевод при выделении: ${next ? "Включен" : "Выключен"}`,
@@ -2091,10 +2176,11 @@ export default {
       },
     });
 
-    const removeHotkeys = setupGlobalHotkeys();
+    const removeHotkeys = setupGlobalHotkeys(ctx);
 
     ctx.onDispose(() => {
       removeHotkeys();
+      closeTiledTranslationPanel();
       const styleEl = document.getElementById("hermes-translate-selection-styles");
       if (styleEl) styleEl.remove();
     });
